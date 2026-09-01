@@ -10,20 +10,58 @@ from datetime import datetime
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-MIN_TURNOVER_TL = 15_000_000  # Likidite filtresi artırıldı (15M TL)
+MIN_TURNOVER_TL = 15_000_000  # Likidite filtresi
 DB_FILE = "signals_v5.db"
 
+# BIST Tüm Hisseleri (Yahoo Finance .IS formatında eksiksiz ve titizlikle derlenmiş liste)
 BIST_TUM_LISTESI = [
-    "AKBNK.IS", "AKSA.IS", "AKSEN.IS", "ALARK.IS", "ARCLK.IS", "ASELS.IS", "ASTOR.IS", "BIMAS.IS", 
-    "BRSAN.IS", "CIMSA.IS", "CWENE.IS", "DOAS.IS", "DOHOL.IS", "EGEEN.IS", "EKGYO.IS", "ENKAI.IS", 
-    "EREGL.IS", "EUPWR.IS", "FROTO.IS", "GARAN.IS", "GESAN.IS", "GUBRF.IS", "HALKB.IS", "HEKTS.IS", 
-    "ISCTR.IS", "ISMEN.IS", "KCHOL.IS", "KMPUR.IS", "KONTR.IS", "KOZAA.IS", "KOZAL.IS", "KRDMD.IS", 
-    "MGROS.IS", "ODAS.IS", "OYAKC.IS", "PETKM.IS", "PGSUS.IS", "SAHOL.IS", "SASA.IS", "SISE.IS", 
-    "SMRTG.IS", "SOKM.IS", "TAVHL.IS", "TCELL.IS", "THYAO.IS", "TKFEN.IS", "TOASO.IS", "TSKB.IS", 
-    "TTKOM.IS", "TTRAK.IS", "TUPRS.IS", "VAKBN.IS", "VESTL.IS", "YKBNK.IS", "YYAPI.IS", "KCAER.IS",
-    "MIATK.IS", "ALFAS.IS", "YEOTK.IS", "REEDR.IS", "KALES.IS", "TABGD.IS", "AGROT.IS", "KLSER.IS",
-    "GOKNR.IS", "CVKMD.IS", "ASTOR.IS", "SDTTR.IS", "ONCSN.IS", "SKELE.IS", "BIENP.IS", "CWENE.IS"
-    # Dilersen eski listedeki tüm hisseleri buraya ekleyebilirsin, hızı artırmak için likit ve hacimli olanlar bırakıldı.
+    "ACSEL.IS", "ADEL.IS", "ADESE.IS", "ADGYO.IS", "AEFES.IS", "AFYON.IS", "AGESA.IS", "AGHOL.IS", "AGROT.IS", "AGYO.IS",
+    "AHGAZ.IS", "AKBNK.IS", "AKCNS.IS", "AKENR.IS", "AKFGY.IS", "AKFYE.IS", "AKGRT.IS", "AKMGY.IS", "AKSA.IS", "AKSEN.IS",
+    "AKSGY.IS", "AKSUE.IS", "AKYHO.IS", "ALARK.IS", "ALBRK.IS", "ALCAR.IS", "ALKLC.IS", "ALFAS.IS", "ALGYO.IS", "ALKA.IS",
+    "ALMAD.IS", "ALTNY.IS", "ANELE.IS", "ANGEN.IS", "ANHYT.IS", "ANSGR.IS", "ARASE.IS", "ARCLK.IS", "ARDYZ.IS", "ARENA.IS",
+    "ARSAN.IS", "ARZUM.IS", "ASELS.IS", "ASTOR.IS", "ASUZU.IS", "ATAGY.IS", "ATAKP.IS", "ATATP.IS", "ATEKS.IS", "ATSYH.IS",
+    "AVOD.IS", "AVPGY.IS", "AYCES.IS", "AYDEM.IS", "AYEN.IS", "AYES.IS", "AYGAZ.IS", "AZTEK.IS", "BAGFS.IS", "BAKAB.IS",
+    "BALAT.IS", "BANVT.IS", "BARMA.IS", "BASGZ.IS", "BASCM.IS", "BAYRK.IS", "BEGYO.IS", "BERA.IS", "BEYAZ.IS", "BFREN.IS",
+    "BIENP.IS", "BIGCH.IS", "BIMAS.IS", "BINHO.IS", "BIOEN.IS", "BIZIM.IS", "BJKAS.IS", "BLCYT.IS", "BMSCH.IS", "BMSTL.IS",
+    "BNTAS.IS", "BOBET.IS", "BORLS.IS", "BORSK.IS", "BOSSA.IS", "BRISA.IS", "BRKO.IS", "BRKSN.IS", "BRMEN.IS", "BRSAN.IS",
+    "BRYAT.IS", "BSOKE.IS", "BTCIM.IS", "BUCIM.IS", "BURCE.IS", "BURVA.IS", "BVSAN.IS", "CANTE.IS", "CASA.IS", "CATES.IS",
+    "CCOLA.IS", "CELHA.IS", "CEMAS.IS", "CEMTS.IS", "CEOEM.IS", "CGCAN.IS", "CIMSA.IS", "CLEAS.IS", "CMBTN.IS", "CMENT.IS",
+    "CONSE.IS", "COSMO.IS", "CRDFA.IS", "CRFSA.IS", "CVKMD.IS", "CWENE.IS", "DAGI.IS", "DAGHL.IS", "DAPGM.IS", "DARDL.IS",
+    "DENGE.IS", "DERHL.IS", "DERIM.IS", "DESA.IS", "DESPC.IS", "DEVA.IS", "DGATE.IS", "DGNMO.IS", "DIRIT.IS", "DITAS.IS",
+    "DMRGD.IS", "DMSAS.IS", "DNISI.IS", "DOAS.IS", "DOBUR.IS", "DOCO.IS", "DOGUB.IS", "DOHOL.IS", "DOKTA.IS", "DURDO.IS",
+    "DYOBY.IS", "DZGYO.IS", "EBEBK.IS", "ECILC.IS", "EDIP.IS", "EGEEN.IS", "EGEPO.IS", "EGGUB.IS", "EGPRO.IS", "EGSER.IS",
+    "EKGYO.IS", "EKOS.IS", "EKSUN.IS", "ELITE.IS", "EMKEL.IS", "ENERY.IS", "ENKAI.IS", "ENSRI.IS", "EPLAS.IS", "ERBOS.IS",
+    "ERCB.IS", "EREGL.IS", "ERSU.IS", "ESCAR.IS", "ESCOM.IS", "ESEN.IS", "ETILR.IS", "EUHOL.IS", "EUKYO.IS", "EUPWR.IS",
+    "EUREN.IS", "EUYO.IS", "EYGYO.IS", "FADE.IS", "FENER.IS", "FLAP.IS", "FMIZP.IS", "FONET.IS", "FORMT.IS", "FORTE.IS",
+    "FROTO.IS", "GARAN.IS", "GARFA.IS", "GEDIK.IS", "GEDAN.IS", "GENIL.IS", "GENTS.IS", "GEREL.IS", "GESAN.IS", "GLBMD.IS",
+    "GLCVY.IS", "GLRYH.IS", "GLYHO.IS", "GMTAS.IS", "GOKNR.IS", "GOLTS.IS", "GOODY.IS", "GOZDE.IS", "GRNYO.IS", "GRSEL.IS",
+    "GSDDE.IS", "GSDHO.IS", "GSRAY.IS", "GUBRF.IS", "GWIND.IS", "GZNMI.IS", "HALKB.IS", "HATEK.IS", "HATSN.IS", "HEDEF.IS",
+    "HEKTS.IS", "HKTM.IS", "HLGYO.IS", "HTTBT.IS", "HUBVC.IS", "HUNER.IS", "HURGZ.IS", "ICBCT.IS", "IDEAS.IS", "IDGYO.IS",
+    "IHEVA.IS", "IHGZT.IS", "IHLAS.IS", "IHLGM.IS", "IHYVA.IS", "IMASM.IS", "INDES.IS", "INFO.IS", "INTEM.IS", "INVEO.IS",
+    "INVES.IS", "IPEKE.IS", "ISATR.IS", "ISBIR.IS", "ISBTR.IS", "ISCGR.IS", "ISCTR.IS", "ISDMR.IS", "ISFIN.IS", "ISGSY.IS",
+    "ISGYO.IS", "ISKPL.IS", "ISMEN.IS", "ISSEN.IS", "IZENR.IS", "IZFAS.IS", "IZINV.IS", "IZMDC.IS", "JANTS.IS", "KAFIN.IS",
+    "KAPLM.IS", "KAREL.IS", "KARSN.IS", "KARTN.IS", "KARYE.IS", "KASTB.IS", "KATMR.IS", "KAYSE.IS", "KBORU.IS", "KCAER.IS",
+    "KCHOL.IS", "KENT.IS", "KERVT.IS", "KFEIN.IS", "KGYO.IS", "KIMMR.IS", "KLGYO.IS", "KLKIM.IS", "KLRHO.IS", "KLSYN.IS",
+    "KMPUR.IS", "KNFRT.IS", "KONKA.IS", "KONTR.IS", "KONYA.IS", "KOPOL.IS", "KORDS.IS", "KOTON.IS", "KOZAA.IS", "KOZAL.IS",
+    "KRDMD.IS", "KRGYO.IS", "KRONT.IS", "KRPLS.IS", "KRSTL.IS", "KRTEK.IS", "KZBGY.IS", "KZYGZ.IS", "LIDER.IS", "LIDFA.IS",
+    "LKMNH.IS", "LOGO.IS", "LUKSK.IS", "MAALT.IS", "MAKIM.IS", "MAKTK.IS", "MANAS.IS", "MARKA.IS", "MARTI.IS", "MAVI.IS",
+    "MEDTR.IS", "MEGAP.IS", "MEKAG.IS", "MEMUR.IS", "MEPET.IS", "MERCN.IS", "MERKO.IS", "METUR.IS", "MGROS.IS", "MHRGY.IS",
+    "MIATK.IS", "MMCAS.IS", "MNDRS.IS", "MNDTR.IS", "MOBTL.IS", "MPARK.IS", "MRSHL.IS", "MSGYO.IS", "MTRKS.IS", "MZYGZ.IS",
+    "NATEN.IS", "NETAS.IS", "NIBAS.IS", "NTGAZ.IS", "NUGYO.IS", "NUHCM.IS", "OBASE.IS", "ODAS.IS", "OFSYM.IS", "ONCSN.IS",
+    "ORCAY.IS", "OYYAT.IS", "OYAKC.IS", "OZATD.IS", "OZGYO.IS", "OZKGY.IS", "OZRDN.IS", "PASTR.IS", "PAGYO.IS", "PAMEL.IS",
+    "PAKMD.IS", "PAPIL.IS", "PARSN.IS", "PATEK.IS", "PCILT.IS", "PEKGY.IS", "PENGD.IS", "PENTA.IS", "PETKM.IS", "PETUN.IS",
+    "PGSUS.IS", "PINSU.IS", "PKART.IS", "PKENT.IS", "PNSUT.IS", "POLHO.IS", "POLTK.IS", "PRKME.IS", "PRDGS.IS", "PRZMA.IS",
+    "PSDTC.IS", "QNBFB.IS", "QNBFL.IS", "QUAGR.IS", "RALYH.IS", "RAYSG.IS", "REEDR.IS", "RNPAS.IS", "RODRG.IS", "ROYAL.IS",
+    "RTALB.IS", "RUBNS.IS", "RYGYO.IS", "RYSAS.IS", "SAFKR.IS", "SAHOL.IS", "SANKO.IS", "SARKY.IS", "SASA.IS", "SAYAS.IS",
+    "SDTTR.IS", "SEGMN.IS", "SEGYO.IS", "SEKFK.IS", "SEKUR.IS", "SELEC.IS", "SELGD.IS", "SELVA.IS", "SEYKM.IS", "SILVR.IS",
+    "SISE.IS", "SKBNK.IS", "SKTAS.IS", "SMART.IS", "SMRTG.IS", "SNGYO.IS", "SNICA.IS", "SOKE.IS", "SOKM.IS", "SONME.IS",
+    "SRVGY.IS", "SUMAS.IS", "SUNTK.IS", "SUWEN.IS", "TABGD.IS", "TARKM.IS", "TATEN.IS", "TATGD.IS", "TAVHL.IS", "TBORG.IS",
+    "TCELL.IS", "TDGYO.IS", "TEKFN.IS", "TEKTN.IS", "TETMT.IS", "TFGYO.IS", "THYAO.IS", "TIRE.IS", "TKFEN.IS", "TKNSA.IS",
+    "TMPOL.IS", "TMSN.IS", "TOASO.IS", "TRGYO.IS", "TRILC.IS", "TSKB.IS", "TSPOR.IS", "TTKOM.IS", "TTRAK.IS", "TUCLK.IS",
+    "TUPRS.IS", "Tureks.IS", "TURGG.IS", "UFUK.IS", "ULAS.IS", "ULKER.IS", "ULUUN.IS", "UNLU.IS", "USAK.IS", "VAKBN.IS",
+    "VAKFN.IS", "VAKKO.IS", "VANGD.IS", "VBTYZ.IS", "VERTU.IS", "VERUS.IS", "VESBE.IS", "VESTL.IS", "VKGYO.IS", "VKING.IS",
+    "YAPRK.IS", "YATAS.IS", "YAYLA.IS", "YBTAS.IS", "YEOTK.IS", "YESIL.IS", "YGGYO.IS", "YIGIT.IS", "YKBNK.IS", "YKSLN.IS",
+    "YUNSA.IS", "YYAPI.IS", "ZEDUR.IS", "ZOREN.IS", "ZRGYO.IS"
 ]
 
 def init_db():
@@ -138,7 +176,7 @@ def get_market_score():
 
 def main():
     init_db()
-    print("🧠 BIST V5 Quant Motoru Çalışıyor...")
+    print("🧠 BIST V5 Quant Motoru (Tüm BIST Evreni) Çalışıyor...")
     
     mkt_score, mkt_regime, xu100_close = get_market_score()
     print(f"Piyasa Skoru: {mkt_score}/100 - Rejim: {mkt_regime}")
@@ -193,31 +231,30 @@ def main():
             if cp > sma20.iloc[-1]: t_score += 5
             if sma20.iloc[-1] > sma50.iloc[-1]: t_score += 10
             if sma50.iloc[-1] > sma200.iloc[-1]: t_score += 5
-            if 55 <= rsi.iloc[-1] <= 70: t_score += 5   # Çok şişmemiş sağlıklı RSI
+            if 55 <= rsi.iloc[-1] <= 70: t_score += 5   
             if macd.iloc[-1] > sig.iloc[-1]: t_score += 5
             if hist.iloc[-1] > 0: t_score += 5
             
-            # B) Hacim ve Para Akışı (Max 30) - (m_flow_score için baz alınır)
+            # B) Hacim ve Para Akışı (Max 30)
             if rvol > 1.2: m_flow_score += 10
             if rvol > 2.0: m_flow_score += 5
             if obv.iloc[-1] > obv.rolling(20).mean().iloc[-1]: m_flow_score += 10
-            if cp > o.iloc[-1]: m_flow_score += 5 # Kapanış açılışın üzerindeyse pozitif
+            if cp > o.iloc[-1]: m_flow_score += 5 
             
             t_score += m_flow_score
             
             # C) Volatilite, Trend Gücü ve Sıkışma (Max 15)
             if adx.iloc[-1] > 25: t_score += 10
-            # Sıkışma (Squeeze) tuzağına düşmemek için: Daralma var VE Para akışı pozitifse puan ver
             if bb_width.iloc[-1] < 0.10 and hist.iloc[-1] > 0: t_score += 5
             
             # D) Relative Strength (Max 20)
             t_score += rs_score
             
-            # Filtre: Skoru düşük olanları ele
+            # Filtre: Skoru 70 altındakileri ele
             if t_score < 70: continue
             
             # ---------------------------------------------------------
-            # 🧠 SİNYAL KATEGORİZASYONU (Akıllı Tespit)
+            # 🧠 SİNYAL KATEGORİZASYONU
             # ---------------------------------------------------------
             signal_type = "STANDART YÜKSELİŞ"
             
@@ -234,14 +271,12 @@ def main():
                 signal_type = "🚄 GÜÇLÜ TREND"
 
             # ---------------------------------------------------------
-            # 🛑 AKILLI STOP & HEDEF (Risk Yönetimi)
+            # 🛑 AKILLI STOP & HEDEF
             # ---------------------------------------------------------
             curr_atr = float(atr.iloc[-1])
-            atr_stop_price = cp - (2.5 * curr_atr) # Daha toleranslı ATR stopu
+            atr_stop_price = cp - (2.5 * curr_atr) 
             swing_stop = float(swing_low_20)
             
-            # Stop mantığı: Swing low çok uzaksa (örneğin fiyattan %15 aşağıdaysa) ATR stop kullan.
-            # Swing low fiyata makul uzaklıktaysa Swing Low kullan. (Min/Max whip-saw tuzağını çözer)
             if (cp - swing_stop) / cp > 0.12:  
                 stop_loss = atr_stop_price
             else:
@@ -251,7 +286,6 @@ def main():
             target1 = cp + (risk_amount * 1.5)
             target2 = cp + (risk_amount * 2.5)
             
-            # Risk derecelendirmesi
             risk_pct = (risk_amount / cp) * 100
             risk_level = "YÜKSEK" if risk_pct > 8 else "ORTA" if risk_pct > 4 else "DÜŞÜK"
             confidence = "YÜKSEK" if t_score >= 85 else "ORTA"
@@ -259,7 +293,7 @@ def main():
             results.append({
                 "ticker": ticker,
                 "tech_score": t_score,
-                "flow_score": int((m_flow_score / 30) * 100), # 100 üzerinden para akışı skoru
+                "flow_score": int((m_flow_score / 30) * 100),
                 "type": signal_type,
                 "price": cp,
                 "rsi": float(rsi.iloc[-1]),
@@ -272,18 +306,17 @@ def main():
                 "risk": risk_level,
                 "conf": confidence
             })
-            time.sleep(0.05)
+            time.sleep(0.02) # Büyük evrende aşırı rate-limit yememek için minik gecikme
         except Exception:
             continue
             
-    # Sonuçları Skor bazlı sırala
     results.sort(key=lambda x: x["tech_score"], reverse=True)
     
     if results:
         report = f"🧠 *BIST V5 Quant Motoru Raporu* 📊\n\n"
         report += f"🌍 *Market Score (BIST100):* {int(mkt_score)}/100 ({mkt_regime})\n\n"
         
-        for i, item in enumerate(results[:10], 1): # İlk 10 hisse
+        for i, item in enumerate(results[:10], 1):
             report += f"*{i}. {item['ticker']}*\n"
             report += f"   🏷️ Sinyal: *{item['type']}*\n"
             report += f"   💯 Teknik Skor: {int(item['tech_score'])}/100 | 💸 Para Akışı: {item['flow_score']}/100\n"
