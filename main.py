@@ -266,7 +266,7 @@ def main():
     final_signals.sort(key=lambda x: x["score"], reverse=True)
     top_5 = final_signals[:5]
     
-    if top_5:
+    if final_signals or not final_signals:
         report = "🚀 *BIST V3 PRO - TOP 5 GÜÇLÜ ADAY* 🚀\n\n"
         for i, s in enumerate(top_5, 1):
             report += (
