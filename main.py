@@ -116,9 +116,19 @@ def rsi(series, period=14):
     rs = avg_gain / avg_loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
 
+def calculate_atr(df, period=14):
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
+    tr1 = high - low
+    tr2 = (high - close.shift()).abs()
+    tr3 = (low - close.shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.ewm(alpha=1/period, adjust=False).mean()
+
 def main():
     init_db()
-    print(f"BIST V3 Pro Genişletilmiş Tarama Başlatıldı ({len(BIST_TUM_LISTESI)} Hisse taranacak)...")
+    print(f"BIST V3 Pro Hibrit Tarama Başlatıldı ({len(BIST_TUM_LISTESI)} Hisse taranacak)...")
     
     results = []
     
@@ -143,8 +153,31 @@ def main():
             
             # Strateji Filtresi: Trend ve Momentum (RSI 50-75 arası)
             if current_price > sma_50 and 50 <= current_rsi <= 75:
-                stop_loss = current_price * 0.95
-                target = current_price * 1.10
+                
+                # --- PROFESYONEL HİBRİT STOP VE HEDEF HESABI ---
+                atr_series = calculate_atr(df)
+                current_atr = float(atr_series.iloc[-1])
+                
+                # Son 10 mumun en düşük dip seviyesi (Yerel Destek)
+                recent_low = float(df["Low"].tail(10).min())
+                
+                # ATR bazlı stop (Fiyattan 1.5 * ATR aşağısı) veya Son Dip seviyesinden hangisi daha mantıklı/güvenliyse
+                atr_stop = current_price - (1.5 * current_atr)
+                
+                # Stop noktası: Son dip ve ATR stopun en mantıklı (makul olan yüksek) seviyesi
+                stop_loss = min(atr_stop, recent_low)
+                
+                # Eğer volatilite nedeniyle stop çok uzaklaşırsa (örn %10'dan fazla), güvenli sınır olarak max %7 stop uygula
+                max_allowable_stop = current_price * 0.93
+                if stop_loss < max_allowable_stop:
+                    stop_loss = max_allowable_stop
+                
+                # Risk mesafesi (Risk per Share)
+                risk_amount = current_price - stop_loss
+                
+                # Risk / Ödül Oranı (R:R) = 1:2 (Risk'in iki katı kazanç hedefi)
+                target = current_price + (risk_amount * 2.0)
+                
                 score = float(current_rsi)
                 
                 results.append({
@@ -156,16 +189,15 @@ def main():
                     "score": score
                 })
             
-            time.sleep(0.05) # GitHub Actions akışının kesintisiz sürmesi için mini bekleme
+            time.sleep(0.05)
         except Exception as e:
-            # Hatalı/delist hisseleri sessizce geç
             continue
             
     if results:
         results.sort(key=lambda x: x["score"], reverse=True)
         top_candidates = results[:10]  # En güçlü ilk 10 aday
         
-        report = "🚀 *BIST V3 Pro - Geniş Pazar Tarama Raporu* 📈\n\n"
+        report = "🚀 *BIST V3 Pro - Hibrit Profesyonel Rapor* 📈\n\n"
         report += f"📅 Tarih: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
         report += f"🔍 Taranan Toplam Hisse: {len(BIST_TUM_LISTESI)}\n\n"
         
@@ -173,11 +205,11 @@ def main():
             report += f"*{i}. {item['ticker']}*\n"
             report += f"   💰 Fiyat: {item['price']:.2f} TL\n"
             report += f"   📊 RSI: {item['rsi']:.1f}\n"
-            report += f"   🛑 Stop: {item['stop']:.2f} TL\n"
-            report += f"   🎯 Hedef: {item['target']:.2f} TL\n\n"
+            report += f"   🛑 Stop (ATR/Dip): {item['stop']:.2f} TL\n"
+            report += f"   🎯 Hedef (1:2 R:R): {item['target']:.2f} TL\n\n"
             
         send_telegram(report)
-        print("Geniş tarama raporu Telegram'a gönderildi.")
+        print("Hibrit profesyonel tarama raporu Telegram'a gönderildi.")
     else:
         send_telegram("⚠️ BIST V3 Pro taraması tamamlandı. Kriterlere uyan hisse bulunamadı.")
         print("Kriterlere uyan aday bulunamadı.")
