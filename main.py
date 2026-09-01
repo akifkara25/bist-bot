@@ -10,17 +10,17 @@ from datetime import datetime
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-MIN_TURNOVER_TL = 1_000_000
+MIN_TURNOVER_TL = 10_000_000  # Minimum günlük ciro filtresi (TL)
 DB_FILE = "signals_tracker.db"
 
-# Güvenilir ve aktif BIST 30/50 sembolleri havuzu
+# Genişletilmiş ve Güvenli BIST Hisse Havuzu
 BIST_TUM_LISTESI = [
-    "AKBNK.IS", "AKSA.IS", "ALARK.IS", "ASELS.IS", "ASTOR.IS", 
-    "BIMAS.IS", "EREGL.IS", "FROTO.IS", "GARAN.IS", "HEKTS.IS", 
-    "ISCTR.IS", "KCHOL.IS", "KONTR.IS", "KRDMD.IS", "MGROS.IS", 
-    "OYAKC.IS", "PETKM.IS", "PGSUS.IS", "SAHOL.IS", "SASA.IS", 
-    "SISE.IS", "TAVHL.IS", "TCELL.IS", "THYAO.IS", "TOASO.IS", 
-    "TUPRS.IS", "VAKBN.IS", "YKBNK.IS", "ENKAI.IS", "EREGL.IS"
+    "AKBNK.IS", "AKSA.IS", "ALARK.IS", "ALBRK.IS", "ARCLK.IS", "ASELS.IS", "ASTOR.IS",
+    "BIMAS.IS", "BRSAN.IS", "CWENE.IS", "ECZYT.IS", "EGEEN.IS", "EKGYO.IS", "ENKAI.IS",
+    "EREGL.IS", "FROTO.IS", "GARAN.IS", "GESAN.IS", "GUBRF.IS", "HEKTS.IS", "ISCTR.IS",
+    "KCHOL.IS", "KONTR.IS", "KOZAA.IS", "KOZAL.IS", "KRDMD.IS", "MAVI.IS", "MGROS.IS",
+    "ODAS.IS", "OYAKC.IS", "PETKM.IS", "PGSUS.IS", "SAHOL.IS", "SASA.IS", "SISE.IS",
+    "TAVHL.IS", "TCELL.IS", "THYAO.IS", "TOASO.IS", "TUPRS.IS", "ULKER.IS", "VAKBN.IS", "YKBNK.IS"
 ]
 
 def init_db():
@@ -63,8 +63,6 @@ def clean_df(df):
         if c not in df.columns:
             return None
     df = df[req].dropna()
-    if len(df) < 20:
-        return None
     return df
 
 def rsi(series, period=14):
@@ -78,49 +76,67 @@ def rsi(series, period=14):
 
 def main():
     init_db()
-    print("BIST V3 Pro Güvenli Tarama Başlatıldı...")
+    print("BIST V3 Pro Gerçek Tarama Başlatıldı...")
     
-    light_results = []
+    results = []
     
     for ticker in BIST_TUM_LISTESI:
         try:
-            df = yf.download(ticker, period="3mo", progress=False)
-            df = clean_df(df)
-            if df is None:
+            df = clean_df(yf.download(ticker, period="6mo", progress=False))
+            if df is None or len(df) < 50:
                 continue
             
             close = df["Close"]
-            curr_rsi = rsi(close).iloc[-1]
-            turnover = (df["Close"] * df["Volume"]).iloc[-5:].mean()
+            vol = df["Volume"]
             
-            if turnover >= MIN_TURNOVER_TL:
-                light_results.append({
+            # Ciro Kontrolü (Son 5 gün ortalaması)
+            turnover = (close * vol).tail(5).mean()
+            if turnover < MIN_TURNOVER_TL:
+                continue
+            
+            # Teknik Hesaplamalar
+            current_rsi = rsi(close).iloc[-1]
+            sma_50 = close.rolling(window=50).mean().iloc[-1]
+            current_price = float(close.iloc[-1])
+            
+            # Strateji Filtresi: Fiyat 50 günlük ortalamanın üstünde VE RSI 50-75 aralığında (Yükseliş Trendi ve Momentum)
+            if current_price > sma_50 and 50 <= current_rsi <= 75:
+                stop_loss = current_price * 0.95  # %5 altı stop
+                target = current_price * 1.10     # %10 üstü hedef
+                score = float(current_rsi)
+                
+                results.append({
                     "ticker": ticker,
-                    "light_score": float(curr_rsi),
-                    "price": float(close.iloc[-1])
+                    "price": current_price,
+                    "rsi": float(current_rsi),
+                    "stop": stop_loss,
+                    "target": target,
+                    "score": score
                 })
+            
+            time.sleep(0.1)
         except Exception as e:
-            print(f"Tarama hatası {ticker}: {e}")
-            continue
-
-    if not light_results:
-        msg = "🤖 *BIST V3 Pro Raporu*\n\nHiçbir hisse hacim kriterini sağlamadı veya veri alınamadı."
-        send_telegram(msg)
-        print("Kriter sağlayan aday bulunamadı, bilgilendirme gönderildi.")
-        return
-
-    # Skorlama ve Sıralama
-    light_results.sort(key=lambda x: x["light_score"], reverse=True)
-    top_candidates = light_results[:5]
-
-    report = "🤖 *BIST V3 Pro - Tarama Sonuçları* 🚀\n\n"
-    for i, c in enumerate(top_candidates, 1):
-        report += f"{i}. 📌 *{c['ticker']}* - RSI: {c['light_score']:.1f}\n"
-        report += f"   💰 Fiyat: {c['price']:.2f} TL\n\n"
-
-    report += f"Zaman: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-    send_telegram(report)
-    print("Başarılı tarama raporu Telegram'a gönderildi.")
+            print(f"Hata {ticker}: {e}")
+            
+    if results:
+        results.sort(key=lambda x: x["score"], reverse=True)
+        top_candidates = results[:5]  # En güçlü ilk 5 aday
+        
+        report = "🚀 *BIST V3 Pro - Gerçek Sinyal Raporu* 📈\n\n"
+        report += f"📅 Tarih: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+        
+        for i, item in enumerate(top_candidates, 1):
+            report += f"*{i}. {item['ticker']}*\n"
+            report += f"   💰 Fiyat: {item['price']:.2f} TL\n"
+            report += f"   📊 RSI: {item['rsi']:.1f}\n"
+            report += f"   🛑 Stop: {item['stop']:.2f} TL\n"
+            report += f"   🎯 Hedef: {item['target']:.2f} TL\n\n"
+            
+        send_telegram(report)
+        print("Gerçek tarama raporu Telegram'a gönderildi.")
+    else:
+        send_telegram("⚠️ BIST V3 Pro taraması tamamlandı. Belirtilen katı kriterlere (Trend + RSI) uyan hisse bulunamadı.")
+        print("Kriterlere uyan aday bulunamadı.")
 
 if __name__ == "__main__":
     main()
