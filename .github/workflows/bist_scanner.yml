@@ -1,0 +1,34 @@
+name: BIST V3 Pro Scanner
+
+on:
+  schedule:
+    # Türkiye Saati (UTC+3 sabit) ile uyumlu zamanlama:
+    # Seans Açılışı Sonrası (10:05 TR = 07:05 UTC)
+    - cron: '5 7 * * 1-5'
+    # Seans Kapanışı Sonrası (18:05 TR = 15:05 UTC)
+    - cron: '5 15 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  bist-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Depoyu Kopyala
+      uses: actions/checkout@v3
+
+    - name: Python Kur
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Kütüphaneleri Yükle
+      run: |
+        python -m pip install --upgrade pip
+        pip install yfinance pandas numpy requests
+
+    - name: Botu Çalıştır
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        CHAT_ID: ${{ secrets.CHAT_ID }}
+      run: python main.py
