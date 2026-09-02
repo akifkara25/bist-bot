@@ -5,6 +5,8 @@ on:
     # Türkiye Saati (UTC+3 sabit) ile uyumlu zamanlama:
     # Seans Açılışı Sonrası (10:05 TR = 07:05 UTC)
     - cron: '5 7 * * 1-5'
+    # Gün Ortası (13:05 TR = 10:05 UTC)
+    - cron: '5 10 * * 1-5'
     # Seans Kapanışı Sonrası (18:05 TR = 15:05 UTC)
     - cron: '5 15 * * 1-5'
   workflow_dispatch:
