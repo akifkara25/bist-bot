@@ -18,10 +18,15 @@ CHAT_ID = os.environ.get("CHAT_ID")
 MIN_TURNOVER_TL = 15_000_000
 DB_FILE = "signals_v9_trend_pullback.db"
 MAX_ALERTS = 10
+MAX_WATCH_ALERTS = 6        # İzleme listesinden en fazla kaç mesaj gönderilsin
 
-# Confluence eşikleri (kaç bağımsız teyit şart)
+# --- GÜÇLÜ SİNYAL eşikleri (yüksek güven, "aksiyon alınabilir") ---
 MIN_CONFLUENCE = 3          # 4 kategoriden en az kaçı onaylamalı
 MIN_RR = 1.3                # Bu R/R oranının altındaki sinyaller elenir
+
+# --- İZLEME LİSTESİ eşikleri (daha gevşek, "değerlendirilebilir", kesin değil) ---
+MIN_CONFLUENCE_WATCH = 2
+MIN_RR_WATCH = 1.0
 
 # Düzeltme (pullback) parametreleri
 PULLBACK_MIN_PCT = 4.0      # Tepeden en az %4 geri çekilme
@@ -488,6 +493,9 @@ def main():
 
     results = []
 
+    # Piyasa zayıfsa güçlü sinyal için eşik +1 sıkılaştırılır (izleme listesi etkilenmez)
+    strong_conf_needed = MIN_CONFLUENCE + (1 if not regime_ok else 0)
+
     for i, (ticker, df) in enumerate(all_data.items(), start=1):
         try:
             close, high, low, volume = df["Close"], df["High"], df["Low"], df["Volume"]
@@ -499,7 +507,9 @@ def main():
                 continue
 
             trend = trend_filter(close)
-            if not trend["ok"]:
+            # En gevşek şart: en azından 200 günlük ortalamanın üzerinde olsun.
+            # Bu bile sağlanmıyorsa hisse "yükseliş trendi" tanımına hiç girmiyor demektir.
+            if not trend.get("above200"):
                 continue
 
             pullback = detect_pullback(high, low, close)
@@ -507,18 +517,21 @@ def main():
                 continue
 
             confluence = evaluate_confluence(df, pullback)
-            if confluence["count"] < MIN_CONFLUENCE:
-                continue
 
             resistance_window = high.iloc[-LOOKBACK_SWING:-1]
             resistance = float(resistance_window.max()) if not resistance_window.empty else pullback["peak_price"]
 
             levels = calc_levels(df, pullback, resistance)
-            if levels is None or levels["rr1"] < MIN_RR:
+            if levels is None:
                 continue
 
-            # Piyasa zayıfsa daha sıkı confluence şartı ara (regime filtresi)
-            if not regime_ok and confluence["count"] < MIN_CONFLUENCE + 1:
+            # --- Katman belirleme ---
+            tier = None
+            if trend["ok"] and confluence["count"] >= strong_conf_needed and levels["rr1"] >= MIN_RR:
+                tier = "STRONG"
+            elif confluence["count"] >= MIN_CONFLUENCE_WATCH and levels["rr1"] >= MIN_RR_WATCH:
+                tier = "WATCH"
+            else:
                 continue
 
             score = (confluence["count"] / 4) * 60 + min(levels["rr1"], 4) * 10
@@ -527,7 +540,7 @@ def main():
             results.append({
                 "ticker": ticker, "close": float(close.iloc[-1]), "score": score,
                 "confluence": confluence, "pullback": pullback, "levels": levels,
-                "trend": trend
+                "trend": trend, "tier": tier
             })
 
         except Exception:
@@ -536,12 +549,17 @@ def main():
         if i % 50 == 0:
             print(f"  ...{i} hisse analiz edildi")
 
-    results.sort(key=lambda x: x["score"], reverse=True)
+    # Güçlü sinyaller önce, sonra izleme listesi; her ikisi de kendi içinde skora göre
+    tier_order = {"STRONG": 1, "WATCH": 0}
+    results.sort(key=lambda x: (tier_order[x["tier"]], x["score"]), reverse=True)
 
-    sent = 0
+    sent_strong, sent_watch = 0, 0
     for item in results:
-        if sent >= MAX_ALERTS:
-            break
+        tier = item["tier"]
+        if tier == "STRONG" and sent_strong >= MAX_ALERTS:
+            continue
+        if tier == "WATCH" and sent_watch >= MAX_WATCH_ALERTS:
+            continue
 
         prev = get_previous_state(item["ticker"])
         should_notify = prev is None or item["score"] >= (prev["score"] or 0) + 5 or item["confluence"]["rvol"] >= (prev["rvol"] or 1) + 0.3
@@ -550,10 +568,19 @@ def main():
             c, l, tr, pb = item["confluence"], item["levels"], item["trend"], item["pullback"]
             checks_text = ", ".join([k for k, v in c["checks"].items() if v]) or "yok"
 
+            if tier == "STRONG":
+                header = "⚡ *TREND İÇİ TOPARLANMA SİNYALİ* (Güçlü)"
+                footer_note = "_Bu bir yatırım tavsiyesi değildir, teknik bir analiz özetidir._"
+            else:
+                header = "🟡 *İZLEME LİSTESİ* (Değerlendirilebilir — kesin sinyal değil)"
+                footer_note = ("_Bu sinyal daha gevşek kriterlerle üretildi, güven seviyesi düşüktür. "
+                                "Ek teyit almadan aksiyon almayın. Yatırım tavsiyesi değildir._")
+
             msg = (
-                f"⚡ *TREND İÇİ TOPARLANMA SİNYALİ*\n\n"
+                f"{header}\n\n"
                 f"📌 *Hisse:* `{item['ticker']}`\n"
-                f"🎯 *Skor:* {item['score']:.1f}/100 | Confluence: {c['count']}/4 ({checks_text})\n\n"
+                f"🎯 *Skor:* {item['score']:.1f}/100 | Confluence: {c['count']}/4 ({checks_text})\n"
+                f"📐 *Trend durumu:* {'Tam onaylı ✅' if tr['ok'] else 'Kısmi (sadece SMA200 üzeri) ⚠️'}\n\n"
                 f"💰 *Fiyat:* {item['close']:.2f}\n"
                 f"📉 *Düzeltme derinliği:* %{pb['drawdown_pct']:.1f} (tepe {pb['peak_price']:.2f} → dip {pb['trough_price']:.2f})\n"
                 f"📈 *Dipten toparlanma:* %{pb['recovery_from_low_pct']:.1f}\n"
@@ -564,23 +591,26 @@ def main():
                 f"🛑 *Stop:* {l['stop']:.2f} (-%{l['risk_pct']:.1f})\n"
                 f"🎯 *Hedef 1:* {l['target1']:.2f} (R/R {l['rr1']:.1f})\n"
                 f"🎯 *Hedef 2:* {l['target2']:.2f} (R/R {l['rr2']:.1f})\n\n"
-                f"_Bu bir yatırım tavsiyesi değildir, teknik bir analiz özetidir._"
+                f"{footer_note}"
             )
             send_telegram(msg)
-            sent += 1
+            if tier == "STRONG":
+                sent_strong += 1
+            else:
+                sent_watch += 1
             time.sleep(0.5)
 
-        update_state(item["ticker"], "PULLBACK_RESUME", item["score"], item["confluence"]["rvol"], item["close"])
+        update_state(item["ticker"], item["tier"], item["score"], item["confluence"]["rvol"], item["close"])
 
     print("\n============================================")
     print("✅ TARAMA TAMAMLANDI")
-    print(f"📊 Eşleşen aday: {len(results)} | 📨 Gönderilen: {sent}")
+    print(f"📊 Eşleşen aday: {len(results)} | 📨 Güçlü gönderilen: {sent_strong} | 📨 İzleme gönderilen: {sent_watch}")
     print("============================================")
 
     if results:
         print("\n🏆 EN GÜÇLÜ ADAYLAR:\n")
         for item in results[:15]:
-            print(f"{item['ticker']:12} | Skor {item['score']:5.1f} | Confluence {item['confluence']['count']}/4 | "
+            print(f"{item['ticker']:12} | {item['tier']:6} | Skor {item['score']:5.1f} | Confluence {item['confluence']['count']}/4 | "
                   f"R/R {item['levels']['rr1']:.1f} | Düzeltme %{item['pullback']['drawdown_pct']:.1f}")
 
 
