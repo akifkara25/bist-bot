@@ -1,43 +1,42 @@
-name: BIST V3 Pro Scanner
+name: BIST Tarama
 
 on:
   schedule:
-    - cron: '5 7 * * 1-5'
-    - cron: '5 10 * * 1-5'
-    - cron: '5 15 * * 1-5'
-  workflow_dispatch:
+    # Cron UTC'dir. Türkiye UTC+3'te sabit (DST yok).
+    # 06:45 UTC = 09:45 TRT -> Açılış öncesi özet (önceki kapanışa göre)
+    - cron: "45 6 * * 1-5"
+    # 15:30 UTC = 18:30 TRT -> Ana tarama (kapanış sonrası, günlük mum kapanmış)
+    - cron: "30 15 * * 1-5"
+  workflow_dispatch: {}   # Manuel tetikleme için
 
 permissions:
-  contents: write
+  contents: write   # state.json'u geri commit'leyebilmek için gerekli
 
 jobs:
-  bist-scan:
+  scan:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Depoyu Kopyala
-      uses: actions/checkout@v3
+      - name: Repo'yu çek
+        uses: actions/checkout@v4
 
-    - name: Python Kur
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    - name: Kütüphaneleri Yükle
-      run: |
-        python -m pip install --upgrade pip
-        pip install yfinance pandas numpy requests
+      - name: Bağımlılıkları kur
+        run: pip install -r requirements.txt
 
-    - name: Botu Çalıştır
-      env:
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-        CHAT_ID: ${{ secrets.CHAT_ID }}
-      run: python main.py
+      - name: Taramayı çalıştır
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python main.py
 
-    - name: Veritabanını Kaydet
-      run: |
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
-        git add signals_v9_trend_pullback.db
-        git diff --staged --quiet || git commit -m "DB güncelleme"
-        git push
+      - name: state.json değişikliğini commit'le
+        run: |
+          git config user.name "bist-scanner-bot"
+          git config user.email "actions@github.com"
+          git add state.json
+          git diff --cached --quiet || git commit -m "state güncellendi [skip ci]"
+          git push
