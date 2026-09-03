@@ -2,14 +2,13 @@ name: BIST V3 Pro Scanner
 
 on:
   schedule:
-    # Türkiye Saati (UTC+3 sabit) ile uyumlu zamanlama:
-    # Seans Açılışı Sonrası (10:05 TR = 07:05 UTC)
     - cron: '5 7 * * 1-5'
-    # Gün Ortası (13:05 TR = 10:05 UTC)
     - cron: '5 10 * * 1-5'
-    # Seans Kapanışı Sonrası (18:05 TR = 15:05 UTC)
     - cron: '5 15 * * 1-5'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   bist-scan:
@@ -34,3 +33,11 @@ jobs:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         CHAT_ID: ${{ secrets.CHAT_ID }}
       run: python main.py
+
+    - name: Veritabanını Kaydet
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add signals_v9_trend_pullback.db
+        git diff --staged --quiet || git commit -m "DB güncelleme"
+        git push
