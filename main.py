@@ -28,17 +28,19 @@ CHAT_ID = os.environ.get("CHAT_ID")
 
 MIN_TURNOVER_TL = 15_000_000
 STATE_FILE = "state.json"
-MAX_TRIGGER_ALERTS = 8
-MAX_SETUP_ALERTS = 8
-MAX_WATCH_ALERTS = 6
-MAX_BREAKOUT_ALERTS = 4
+
+MAX_MAIN_BREAK_ALERTS = 8    # Ana direnç kırılımı (en yüksek güven)
+MAX_LOCAL_BREAK_ALERTS = 8   # Yerel/erken kırılım (orta-yüksek güven, erken haber)
+MAX_EXTENDED_ALERTS = 4      # Aşırı uzamış (kovalama riski uyarısı)
+MAX_SETUP_ALERTS = 8         # Kurulum hazır, henüz kırılım yok
+MAX_WATCH_ALERTS = 6         # İzleme (düşük güven)
 
 # --- Veri kalitesi eşikleri ---
 MAX_STALE_DAYS = 5
 MIN_SUCCESS_RATE = 0.6
 MAX_DAILY_JUMP_PCT = 60.0
 
-# --- Confluence eşikleri (5 kategori üzerinden; NOT: backtest edilmedi, ilk mantıklı tahmin) ---
+# --- Confluence eşikleri (4 ana kategori üzerinden) ---
 MIN_CONFLUENCE_STRONG = 3
 MIN_CONFLUENCE_WATCH = 2
 MIN_RR = 1.3
@@ -47,23 +49,21 @@ MIN_RR_WATCH = 1.0
 # Düzeltme (pullback) parametreleri
 PULLBACK_MIN_PCT = 4.0
 PULLBACK_MAX_PCT = 22.0
-LOOKBACK_SWING = 60          # pullback / RSI divergence için gün penceresi
-LOOKBACK_STRUCTURE = 120     # HH/HL ve direnç taraması için daha geniş pencere
-SWING_ORDER = 3              # bir noktanın "swing" sayılması için her yanında kaç gün karşılaştırılsın
+LOOKBACK_SWING = 60
+LOOKBACK_STRUCTURE = 120
+SWING_ORDER = 3
 
 # Volatilite sıkışması (Bollinger Band Width)
 BBW_LOOKBACK = 120
-BBW_SQUEEZE_PERCENTILE = 20  # son 120 günün en dar %20'lik dilimindeyse "sıkışma"
+BBW_SQUEEZE_PERCENTILE = 20
 
 # Relatif güç (XU100'e göre)
 RS_LOOKBACK = 20
 
-# Kırılım sonrası "çok geç kalındı" eşiği
+# Ana direnç kırılımından sonra "çok geç kalındı" eşiği
 BREAKOUT_EXTENDED_PCT = 8.0
 
-# Skor ağırlıkları — HENÜZ BACKTEST EDİLMEDİ. İlk mantıklı tahmin; Faz 3'te
-# geçmiş veriyle optimize edilecek. Toplamı 1.0 (ana bileşenler 90 puanlık,
-# R/R kalitesi ayrı 10 puanlık bonus).
+# Skor ağırlıkları — HENÜZ BACKTEST EDİLMEDİ. İlk mantıklı tahmin.
 SCORE_WEIGHTS = {
     "trend": 0.20,
     "pullback": 0.15,
@@ -312,7 +312,6 @@ def calc_cmf(df, period=20):
 
 
 def calc_bbw(close, period=20, num_std=2):
-    """Bollinger Band Width: bant genişliği / orta bant. Düşük değer = sıkışma."""
     sma = close.rolling(period).mean()
     std = close.rolling(period).std()
     upper = sma + num_std * std
@@ -320,12 +319,10 @@ def calc_bbw(close, period=20, num_std=2):
     return (upper - lower) / sma
 
 # ============================================================
-# SWING (GERÇEK TEPE/DİP) TESPİTİ — scipy ile
+# SWING (GERÇEK TEPE/DİP) TESPİTİ
 # ============================================================
 
 def _dedupe_consecutive(idx_array):
-    """Düz (plateau) bölgelerde argrelextrema'nın ürettiği bitişik indeksleri
-    tek bir noktaya indirger (her grubun son elemanını tutar)."""
     if len(idx_array) == 0:
         return idx_array
     groups, current = [], [idx_array[0]]
@@ -340,9 +337,6 @@ def _dedupe_consecutive(idx_array):
 
 
 def find_swings(series, order=SWING_ORDER, mode="max"):
-    """Gerçek swing high/low noktalarının index'lerini döner (her yanında
-    `order` kadar barla karşılaştırılarak). Sabit pencere maksimumu/minimumu
-    DEĞİL, gerçek dönüş noktalarını bulur."""
     if len(series) < order * 2 + 1:
         return pd.Index([])
     arr = series.values.astype(float)
@@ -352,14 +346,14 @@ def find_swings(series, order=SWING_ORDER, mode="max"):
     return series.index[idx]
 
 # ============================================================
-# 1) TREND: SMA20/50/200 + eğim + haftalık teyit + HH/HL yapısı
+# 1) TREND
 # ============================================================
 
 def weekly_trend_ok(df):
     try:
         w = df.resample("W-FRI").agg({"Close": "last"}).dropna()
         if len(w) < 15:
-            return True  # yeterli haftalık veri yok, engelleme
+            return True
         close_w = w["Close"]
         sma10w = close_w.rolling(10).mean()
         if sma10w.isna().iloc[-1]:
@@ -401,7 +395,6 @@ def trend_filter(df):
     structure = hh_hl_structure(high, low)
     weekly_ok = weekly_trend_ok(df)
 
-    # Tam onay: SMA200 üzeri + SMA50 yükseliyor + golden + (higher-low YA DA SMA50 üzeri) + haftalık teyit
     ok = above200 and sma50_rising and golden and (structure["hl"] or above50) and weekly_ok
 
     return {
@@ -411,15 +404,10 @@ def trend_filter(df):
     }
 
 # ============================================================
-# 2) DÜZELTME (PULLBACK) — gerçek swing high/low bazlı
+# 2) DÜZELTME (PULLBACK)
 # ============================================================
 
 def detect_pullback(high, low, close, lookback=LOOKBACK_SWING, order=SWING_ORDER, context_buffer=30):
-    """
-    `lookback` gün içindeki gerçek tepe/dip aranır, ama swing tespitinin sınırda
-    yanlış çalışmaması için `context_buffer` kadar ekstra geçmiş veriyle
-    (sol bağlam) çalışılır — tepe/dip yine de son `lookback` gün içinden seçilir.
-    """
     window = lookback + context_buffer
     if len(close) < window:
         return {"ok": False}
@@ -434,8 +422,6 @@ def detect_pullback(high, low, close, lookback=LOOKBACK_SWING, order=SWING_ORDER
     cutoff = h.index[-lookback]
     recent_peaks = [idx for idx in sh_idx if idx >= cutoff]
     candidates = recent_peaks if recent_peaks else list(sh_idx)
-    # En SON değil, en YÜKSEK (en anlamlı) swing high tercih edilir — toparlanma
-    # sürecindeki küçük gürültü tepeleri asıl düzeltme başlangıcıyla karışmasın.
     peak_idx = h.loc[candidates].idxmax()
     peak_price = float(h.loc[peak_idx])
     if peak_price <= 0:
@@ -452,9 +438,6 @@ def detect_pullback(high, low, close, lookback=LOOKBACK_SWING, order=SWING_ORDER
     recovery_from_low_pct = (cp - trough_price) / trough_price * 100 if trough_price > 0 else 0
     healthy_depth = PULLBACK_MIN_PCT <= drawdown_pct <= PULLBACK_MAX_PCT
 
-    # Toparlanma teyidi — SADECE %1 değil, üçünden biri yeterli:
-    # (a) dipten belirgin toparlanma, (b) dip sonrası higher-low oluşmuş,
-    # (c) fiyat son günlerin zirvesine yaklaşmış/geçmiş
     after_trough_low = l.loc[trough_idx:]
     sl_after = find_swings(after_trough_low, order, "min")
     higher_low_after_trough = False
@@ -477,7 +460,7 @@ def detect_pullback(high, low, close, lookback=LOOKBACK_SWING, order=SWING_ORDER
     }
 
 # ============================================================
-# 3) MOMENTUM: gerçek swing diplerinde RSI divergence + MACD
+# 3) MOMENTUM
 # ============================================================
 
 def rsi_bullish_divergence(close, rsi, peak_idx, order=SWING_ORDER):
@@ -510,7 +493,7 @@ def macd_confirm(hist, macd_line, signal_line):
     return bool((rising and accelerating) or recent_cross)
 
 # ============================================================
-# 4) HACİM: düşüşte daralma + toparlanmada artış + OBV/CMF uyumu
+# 4) HACİM
 # ============================================================
 
 def volume_profile(volume, peak_idx, trough_idx):
@@ -532,7 +515,7 @@ def volume_profile(volume, peak_idx, trough_idx):
         return False, False
 
 # ============================================================
-# 5) RELATİF GÜÇ (XU100'e göre)
+# 5) RELATİF GÜÇ
 # ============================================================
 
 def relative_strength(close, xu100_close, lookback=RS_LOOKBACK):
@@ -552,7 +535,7 @@ def relative_strength(close, xu100_close, lookback=RS_LOOKBACK):
         return {"ok": True, "rs_change_pct": 0.0, "available": False}
 
 # ============================================================
-# 6) CONFLUENCE (5 kategori)
+# 6) CONFLUENCE (4 ana kategori + sıkışma bonusu)
 # ============================================================
 
 def evaluate_confluence(df, pullback):
@@ -591,9 +574,9 @@ def evaluate_confluence(df, pullback):
     if len(recent_bbw) >= 30 and not pd.isna(bbw.iloc[-1]):
         threshold = np.percentile(recent_bbw, BBW_SQUEEZE_PERCENTILE)
         squeeze = bool(bbw.iloc[-1] <= threshold)
-    checks["sikisma"] = squeeze  # bonus niteliğinde, zorunlu şart değil
+    checks["sikisma"] = squeeze  # bonus niteliğinde, ana sayıma dahil değil
 
-    confluence_count = sum(v for k, v in checks.items() if k != "sikisma")  # ana 4 kategori
+    confluence_count = sum(v for k, v in checks.items() if k != "sikisma")
 
     return {
         "checks": checks, "count": confluence_count, "rvol": rvol,
@@ -603,7 +586,7 @@ def evaluate_confluence(df, pullback):
     }
 
 # ============================================================
-# 7) DİRENÇ SEVİYELERİ (birden fazla gerçek swing high)
+# 7) DİRENÇ SEVİYELERİ
 # ============================================================
 
 def find_resistances(high, close, lookback=LOOKBACK_STRUCTURE, order=SWING_ORDER):
@@ -617,7 +600,7 @@ def find_resistances(high, close, lookback=LOOKBACK_STRUCTURE, order=SWING_ORDER
     return nearest, second
 
 # ============================================================
-# 8) GİRİŞ / STOP / HEDEF SEVİYELERİ (iki kademeli giriş)
+# 8) GİRİŞ / STOP / HEDEF SEVİYELERİ
 # ============================================================
 
 def calc_levels(df, pullback, resistances):
@@ -625,11 +608,14 @@ def calc_levels(df, pullback, resistances):
     atr = float(calc_atr(df).iloc[-1])
     trough = pullback["trough_price"]
 
-    # Erken giriş bölgesi: dip civarı — agresif/kademeli pozisyon için
     entry_early_low = trough * 1.005
     entry_early_high = trough * 1.05
 
-    # Kırılım teyit seviyesi: son günlerin zirvesinin hafif üzeri — asıl tetik
+    # Yerel (kısa vadeli) tetik: son 3 günün zirvesinin hafif üzeri.
+    # DİKKAT: bu, hissenin GERÇEK yapısal direncinden (aşağıdaki nearest_res)
+    # tamamen farklı ve genelde çok daha yakın bir seviyedir. Bunu "büyük
+    # kırılım" ile karıştırmamak için stage belirlerken ikisini AYRI ayrı
+    # kontrol ediyoruz (bkz. determine_stage).
     recent_high = float(high.tail(3).max())
     cp = float(close.iloc[-1])
     entry_trigger = max(recent_high * 1.001, cp)
@@ -669,10 +655,18 @@ def market_regime_ok(xu100_df):
     return float(close.iloc[-1]) > float(sma50.iloc[-1])
 
 # ============================================================
-# 10) SKOR (0-100) — bileşenler + R/R bonusu
+# 10) SKOR (0-100)
 # ============================================================
 
-def compute_score(trend, pullback, checks, rs, rr1):
+def compute_score(trend, pullback, confluence, rs, rr1):
+    """
+    DÜZELTME (v3): Önceki sürümde `checks` alt-sözlüğü içinde olmayan
+    'decline_shrank' anahtarı aranıyordu, bu yüzden ara puan (50) hiçbir
+    zaman verilmiyordu. Artık `confluence` sözlüğünün TAMAMI alınıyor,
+    'decline_shrank' doğru yerden (üst seviyeden) okunuyor.
+    """
+    checks = confluence["checks"]
+
     trend_flags = [trend["above20"], trend["above50"], trend["above200"], trend["sma50_rising"],
                    trend["golden"], trend["weekly_ok"], trend["hh"], trend["hl"]]
     trend_score = 100 * sum(bool(x) for x in trend_flags) / len(trend_flags)
@@ -682,7 +676,15 @@ def compute_score(trend, pullback, checks, rs, rr1):
     pullback_score = max(0.0, 100 * (1 - dist))
 
     momentum_score = 100 if checks["momentum"] and checks["macd"] else (60 if (checks["momentum"] or checks["macd"]) else 25)
-    volume_score = 100 if checks["hacim"] else (50 if (checks["decline_shrank"] if "decline_shrank" in checks else False) else 25)
+
+    # DÜZELTİLMİŞ satır: artık gerçekten 100/50/25 üç seviyeli çalışıyor.
+    if checks["hacim"]:
+        volume_score = 100
+    elif confluence.get("decline_shrank"):
+        volume_score = 50
+    else:
+        volume_score = 25
+
     structure_score = 100 if checks["yapi"] else 30
     squeeze_score = 100 if checks["sikisma"] else 40
     rs_score = max(0.0, min(100.0, 50 + rs.get("rs_change_pct", 0.0) * 5))
@@ -696,70 +698,126 @@ def compute_score(trend, pullback, checks, rs, rr1):
         squeeze_score * SCORE_WEIGHTS["squeeze"] +
         rs_score * SCORE_WEIGHTS["relative_strength"]
     )
-    rr_bonus = min(rr1, 4) * 2.5  # R/R kalitesine ek en fazla 10 puan
+    rr_bonus = min(rr1, 4) * 2.5
     score = min(100.0, raw * 0.9 + rr_bonus)
     return round(score, 1)
 
 # ============================================================
-# 11) DURUM MAKİNESİ: WATCH -> SETUP -> TRIGGER -> BREAKOUT
+# 11) DURUM MAKİNESİ (v3 — düzeltilmiş)
 # ============================================================
+#
+# DEĞİŞİKLİK ÖZETİ (önceki hatalara karşı):
+#   1) Artık HİÇBİR "kırılım" aşaması (yerel ya da ana) strong_ok=False
+#      iken verilemiyor. Önceki sürümde zayıf confluence/trend'e sahip
+#      bir hisse, sırf fiyatı son 3 günün tepesini geçtiği için en
+#      yüksek öncelikli "TRIGGER" etiketini alabiliyordu — bu artık
+#      imkansız. strong_ok=False olan her aday en fazla WATCH'ta kalır.
+#   2) Yerel (kısa vadeli, 3 günlük) kırılım ile gerçek yapısal direnç
+#      kırılımı ARTIK AYRI aşamalar: LOCAL_BREAK (erken haber, orta
+#      güven) ve MAIN_BREAK (yüksek güven). İkisi karıştırılmıyor.
 
-def determine_stage(trend, pullback, confluence, rs, levels, cp):
+def determine_stage(trend, pullback, confluence, levels, cp, structural_resistance):
     loose_ok = pullback["ok"] and confluence["count"] >= MIN_CONFLUENCE_WATCH
     if not loose_ok:
         return None
 
     strong_ok = trend["ok"] and confluence["count"] >= MIN_CONFLUENCE_STRONG and levels["rr1"] >= MIN_RR
 
-    triggered = cp >= levels["entry_trigger"]
-    extended = triggered and cp >= levels["entry_trigger"] * (1 + BREAKOUT_EXTENDED_PCT / 100)
+    # Zayıf adaylar (strong_ok değil) fiyat ne yaparsa yapsın WATCH'ta kalır.
+    if not strong_ok:
+        return "WATCH"
+
+    local_triggered = cp >= levels["entry_trigger"]
+    structural_triggered = structural_resistance is not None and cp >= structural_resistance
+    extended = structural_triggered and cp >= structural_resistance * (1 + BREAKOUT_EXTENDED_PCT / 100)
 
     if extended:
-        return "BREAKOUT"
-    if triggered:
-        return "TRIGGER"
-    if strong_ok:
-        return "SETUP"
-    return "WATCH"
+        return "EXTENDED"
+    if structural_triggered:
+        return "MAIN_BREAK"
+    if local_triggered:
+        return "LOCAL_BREAK"
+    return "SETUP"
 
 # ============================================================
-# MESAJ OLUŞTURMA
+# MESAJ OLUŞTURMA (v3 — Türkçe, kategorik, daha anlaşılır)
 # ============================================================
 
-STAGE_HEADERS = {
-    "WATCH":    ("🟡 *İZLEME*", "Erken aşama — sadece radarına girsin. Aksiyon sinyali değildir."),
-    "SETUP":    ("🟠 *KURULUM TAMAMLANIYOR*", "Kriterler güçlü ama kırılım henüz gerçekleşmedi. Kırılım teyit seviyesini izle."),
-    "TRIGGER":  ("⚡ *TETİKLENDİ*", "Kırılım teyit seviyesi geçildi — aksiyon anı. Yine de kendi teyidini almadan girme."),
-    "BREAKOUT": ("🔴 *GENİŞ HAREKET*", "Fiyat tetik seviyesinden belirgin uzaklaşmış — kovalama riski yüksek, dikkatli ol."),
+STAGE_INFO = {
+    "WATCH": {
+        "baslik": "🔵 İZLEME LİSTESİ",
+        "ozet": "Erken aşama, düşük güven. Sadece radarına girsin.",
+        "detay": "Kriterlerin bir kısmı sağlanıyor ama trend/teyit tam değil. Aksiyon sinyali değildir.",
+    },
+    "SETUP": {
+        "baslik": "🟠 KURULUM HAZIR",
+        "ozet": "Trend ve teyitler güçlü, kırılım henüz yok.",
+        "detay": "Tüm kriterler olumlu ama fiyat henüz hiçbir seviyeyi kırmadı. Aşağıdaki seviyeleri takip et.",
+    },
+    "LOCAL_BREAK": {
+        "baslik": "🟡 ERKEN KIRILIM (Yerel)",
+        "ozet": "Kısa vadeli bant kırıldı — erken bir ipucu.",
+        "detay": ("Fiyat kendi kısa vadeli (3 günlük) bandını kırdı ve teyitler güçlü. "
+                   "Ancak hisse HÂLÂ gerçek (uzun vadeli) direncinden uzak olabilir — "
+                   "bu erken bir sinyal, ana kırılım değil. Temkinli değerlendir."),
+    },
+    "MAIN_BREAK": {
+        "baslik": "🟢 ANA DİRENÇ KIRILDI",
+        "ozet": "Fiyat, geçmişteki gerçek direnci geçti.",
+        "detay": "Bu, sistemin en yüksek güvenilirlikli aşaması: fiyat, son 120 günün gerçek direncini kırdı.",
+    },
+    "EXTENDED": {
+        "baslik": "🔴 AŞIRI UZAMIŞ",
+        "ozet": "Kırılımdan bu yana fiyat belirgin uzaklaşmış.",
+        "detay": "Ana direnç kırıldıktan sonra fiyat hızla uzaklaşmış. Kovalama riski yüksek, dikkatli ol.",
+    },
 }
 
 
 def build_message(ticker, item):
     stage = item["stage"]
-    header, stage_note = STAGE_HEADERS[stage]
+    info = STAGE_INFO[stage]
     c, l, tr, pb, rs = item["confluence"], item["levels"], item["trend"], item["pullback"], item["rs"]
+    nearest_res, second_res = item["resistances"]
+
     checks_text = ", ".join([k for k, v in c["checks"].items() if v and k != "sikisma"]) or "yok"
     squeeze_text = " + sıkışma ✓" if c["checks"]["sikisma"] else ""
     rs_text = f"{rs['rs_change_pct']:+.1f}%" if rs.get("available") else "veri yetersiz"
+    res_text = f"{nearest_res:.2f}" if nearest_res else "tespit edilemedi (veri penceresi dışında)"
 
     msg = (
-        f"{header}\n_{stage_note}_\n\n"
-        f"📌 *Hisse:* `{ticker}`\n"
-        f"🎯 *Skor:* {item['score']:.1f}/100 | Confluence: {c['count']}/4 ({checks_text}{squeeze_text})\n"
-        f"📐 *Trend:* {'Tam onaylı ✅' if tr['ok'] else 'Kısmi ⚠️'} | Haftalık: {'✅' if tr['weekly_ok'] else '⚠️'}\n"
-        f"📊 *XU100'e göre relatif güç:* {rs_text}\n\n"
-        f"💰 *Fiyat:* {item['close']:.2f}\n"
-        f"📉 *Düzeltme:* %{pb['drawdown_pct']:.1f} (tepe {pb['peak_price']:.2f} → dip {pb['trough_price']:.2f})\n"
-        f"📈 *Dipten toparlanma:* %{pb['recovery_from_low_pct']:.1f}"
-        f"{' | Higher-low ✓' if pb['higher_low_after_trough'] else ''}\n"
-        f"🔀 *RSI:* {c['rsi']:.1f}{' (bullish divergence ✓)' if c['divergence'] else ''}\n"
-        f"💵 *CMF:* {c['cmf']:+.2f} | *RVOL:* {c['rvol']:.2f}x\n\n"
-        f"🟢 *Erken giriş bölgesi:* {l['entry_early_low']:.2f} - {l['entry_early_high']:.2f} (agresif, teyitsiz)\n"
-        f"🎯 *Kırılım teyit seviyesi:* {l['entry_trigger']:.2f} (asıl tetik)\n"
-        f"🛑 *Stop:* {l['stop']:.2f} (-%{l['risk_pct']:.1f})\n"
-        f"🎯 *Hedef 1:* {l['target1']:.2f} (R/R {l['rr1']:.1f}){'  [gerçek direnç]' if l['target1_is_real_resistance'] else '  [hesaplanmış]'}\n"
-        f"🎯 *Hedef 2:* {l['target2']:.2f} (R/R {l['rr2']:.1f})\n\n"
-        f"_Yatırım tavsiyesi değildir, teknik analiz özetidir. Skor ağırlıkları henüz backtest edilmedi._"
+        f"{info['baslik']}\n"
+        f"_{info['ozet']}_\n\n"
+
+        f"📌 *HİSSE*\n"
+        f"`{ticker}`  |  Güncel fiyat: *{item['close']:.2f} TL*\n\n"
+
+        f"📊 *GENEL DURUM*\n"
+        f"Skor: *{item['score']:.1f}/100*\n"
+        f"Confluence (teyit): {c['count']}/4 → {checks_text}{squeeze_text}\n"
+        f"{info['detay']}\n\n"
+
+        f"📈 *TEKNİK GÖRÜNÜM*\n"
+        f"• Trend: {'Tam onaylı ✅' if tr['ok'] else 'Kısmi ⚠️'} (Haftalık: {'✅' if tr['weekly_ok'] else '⚠️'})\n"
+        f"• RSI: {c['rsi']:.1f}{' — bullish divergence ✓' if c['divergence'] else ''}\n"
+        f"• MACD: {'Dönüş teyitli ↑' if c['checks']['macd'] else 'Henüz teyit yok'}\n"
+        f"• Hacim/Para girişi: {'Olumlu ✓' if c['checks']['hacim'] else ('Kısmen olumlu' if c['decline_shrank'] else 'Zayıf')} (CMF: {c['cmf']:+.2f}, RVOL: {c['rvol']:.2f}x)\n"
+        f"• BIST'e göre görece güç (20G): {rs_text}\n\n"
+
+        f"🪜 *DÜZELTME BİLGİSİ*\n"
+        f"Tepe: {pb['peak_price']:.2f} → Dip: {pb['trough_price']:.2f}  (düzeltme: %{pb['drawdown_pct']:.1f})\n"
+        f"Dipten toparlanma: %{pb['recovery_from_low_pct']:.1f}"
+        f"{' | Higher-low ✓' if pb['higher_low_after_trough'] else ''}\n\n"
+
+        f"🎯 *SEVİYELER*\n"
+        f"🟢 Erken giriş bölgesi (agresif, teyitsiz): {l['entry_early_low']:.2f} - {l['entry_early_high']:.2f}\n"
+        f"🟡 Yerel kırılım seviyesi: {l['entry_trigger']:.2f}\n"
+        f"🟢 Gerçek yapısal direnç: {res_text}\n"
+        f"🛑 Stop: {l['stop']:.2f}  (-%{l['risk_pct']:.1f})\n"
+        f"🎯 Hedef 1: {l['target1']:.2f}  (R/R {l['rr1']:.1f}){' [gerçek direnç]' if l['target1_is_real_resistance'] else ' [hesaplanmış]'}\n"
+        f"🎯 Hedef 2: {l['target2']:.2f}  (R/R {l['rr2']:.1f})\n\n"
+
+        f"⚠️ _Yatırım tavsiyesi değildir, teknik analiz özetidir. Skor ağırlıkları henüz backtest edilmedi._"
     )
     return msg
 
@@ -769,7 +827,7 @@ def build_message(ticker, item):
 
 def main():
     log.info("============================================")
-    log.info("🧠 BIST TREND+PULLBACK+CONFLUENCE ENGINE v2")
+    log.info("🧠 BIST TREND+PULLBACK+CONFLUENCE ENGINE v3")
     log.info("============================================")
 
     state = load_state()
@@ -821,17 +879,18 @@ def main():
 
             rs = relative_strength(close, xu100_close)
             cp = float(close.iloc[-1])
+            nearest_res, _ = resistances
 
-            stage = determine_stage(trend, pullback, confluence, rs, levels, cp)
+            stage = determine_stage(trend, pullback, confluence, levels, cp, nearest_res)
             if stage is None:
                 continue
 
-            score = compute_score(trend, pullback, confluence["checks"], rs, levels["rr1"])
+            score = compute_score(trend, pullback, confluence, rs, levels["rr1"])
 
             results.append({
                 "ticker": ticker, "close": cp, "score": score,
                 "confluence": confluence, "pullback": pullback, "levels": levels,
-                "trend": trend, "rs": rs, "stage": stage,
+                "trend": trend, "rs": rs, "stage": stage, "resistances": resistances,
             })
 
         except Exception:
@@ -840,12 +899,14 @@ def main():
         if i % 50 == 0:
             log.info(f"  ...{i} hisse analiz edildi")
 
-    stage_order = {"TRIGGER": 3, "BREAKOUT": 2, "SETUP": 1, "WATCH": 0}
+    stage_order = {"MAIN_BREAK": 4, "LOCAL_BREAK": 3, "EXTENDED": 2, "SETUP": 1, "WATCH": 0}
     results.sort(key=lambda x: (stage_order[x["stage"]], x["score"]), reverse=True)
 
-    sent_counts = {"TRIGGER": 0, "SETUP": 0, "WATCH": 0, "BREAKOUT": 0}
-    max_counts = {"TRIGGER": MAX_TRIGGER_ALERTS, "SETUP": MAX_SETUP_ALERTS,
-                  "WATCH": MAX_WATCH_ALERTS, "BREAKOUT": MAX_BREAKOUT_ALERTS}
+    sent_counts = {"MAIN_BREAK": 0, "LOCAL_BREAK": 0, "EXTENDED": 0, "SETUP": 0, "WATCH": 0}
+    max_counts = {
+        "MAIN_BREAK": MAX_MAIN_BREAK_ALERTS, "LOCAL_BREAK": MAX_LOCAL_BREAK_ALERTS,
+        "EXTENDED": MAX_EXTENDED_ALERTS, "SETUP": MAX_SETUP_ALERTS, "WATCH": MAX_WATCH_ALERTS,
+    }
 
     for item in results:
         stage = item["stage"]
@@ -853,8 +914,6 @@ def main():
             continue
 
         prev = get_previous_state(state, item["ticker"])
-        # Durum makinesi mantığı: sadece AŞAMA DEĞİŞTİĞİNDE bildirim gönder.
-        # Aynı aşamada kalırken skor belirgin iyileşirse yine de haber ver.
         stage_changed = prev is None or prev.get("stage") != stage
         score_improved = prev is not None and item["score"] >= (prev.get("score") or 0) + 8
         should_notify = stage_changed or score_improved
@@ -877,7 +936,7 @@ def main():
     if results:
         log.info("🏆 EN GÜÇLÜ ADAYLAR:")
         for item in results[:15]:
-            log.info(f"{item['ticker']:12} | {item['stage']:8} | Skor {item['score']:5.1f} | "
+            log.info(f"{item['ticker']:12} | {item['stage']:12} | Skor {item['score']:5.1f} | "
                      f"Confluence {item['confluence']['count']}/4 | R/R {item['levels']['rr1']:.1f}")
 
 
