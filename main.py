@@ -63,6 +63,26 @@ RS_LOOKBACK = 20
 # Ana direnç kırılımından sonra "çok geç kalındı" eşiği
 BREAKOUT_EXTENDED_PCT = 8.0
 
+
+def market_session_label():
+    """
+    Türkiye UTC+3'te sabit (yaz saati yok), bu yüzden basit ofset yeterli.
+    Bot artık gün içinde de çalıştığı için, mesajlarda VERİNİN NE KADAR
+    KESİNLEŞMİŞ olduğunu açıkça belirtmemiz gerekiyor — piyasa açıkken
+    çekilen "bugünün mumu" henüz tamamlanmamıştır (hacim özellikle düşük
+    görünür, RVOL yanıltıcı olabilir).
+    """
+    trt_now = datetime.utcnow() + timedelta(hours=3)
+    minutes = trt_now.hour * 60 + trt_now.minute
+
+    if minutes < 10 * 60:
+        return "⏰ *Piyasa henüz açılmadı* — bu veriler önceki kapanışa ait, kesinleşmiş."
+    elif minutes < 18 * 60:
+        return ("⚠️ *Piyasa şu an AÇIK* — bugünün mumu henüz tamamlanmadı. "
+                "Özellikle hacim (RVOL) düşük görünebilir, gün sonuna kadar değişebilir.")
+    else:
+        return "✅ *Piyasa kapandı* — bugünün verisi kesinleşmiş, güvenilirliği en yüksek tarama budur."
+
 # Skor ağırlıkları — HENÜZ BACKTEST EDİLMEDİ. İlk mantıklı tahmin.
 SCORE_WEIGHTS = {
     "trend": 0.20,
@@ -157,11 +177,25 @@ def get_previous_state(state, ticker):
     return state.get(ticker)
 
 
-def update_state(state, ticker, stage, score, rvol, close):
-    state[ticker] = {
+def update_state(state, ticker, stage, score, rvol, close, position=None, clear_position=False):
+    """
+    ÖNEMLİ: position parametresi verilmezse (None) ve clear_position=False ise,
+    varsa MEVCUT açık pozisyon KORUNUR. Aksi halde her sıradan WATCH/SETUP
+    güncellemesinde, arkada takip edilen bir kırılım pozisyonu sessizce
+    silinmiş olurdu — bu ciddi bir hata olurdu, bilerek böyle tasarlandı.
+    """
+    existing = state.get(ticker, {})
+    entry = {
         "stage": stage, "score": score, "rvol": rvol, "close": close,
         "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
+    if position is not None:
+        entry["position"] = position
+    elif clear_position:
+        entry["position"] = None
+    else:
+        entry["position"] = existing.get("position")
+    state[ticker] = entry
 
 # ============================================================
 # TELEGRAM
@@ -787,7 +821,8 @@ def build_message(ticker, item):
 
     msg = (
         f"{info['baslik']}\n"
-        f"_{info['ozet']}_\n\n"
+        f"_{info['ozet']}_\n"
+        f"{market_session_label()}\n\n"
 
         f"📌 *HİSSE*\n"
         f"`{ticker}`  |  Güncel fiyat: *{item['close']:.2f} TL*\n\n"
@@ -822,6 +857,97 @@ def build_message(ticker, item):
     return msg
 
 # ============================================================
+# POZİSYON TAKİBİ (v4 — yeni)
+# ============================================================
+#
+# SADECE gerçekten "tetiklenmiş" sinyaller takip edilir: LOCAL_BREAK,
+# MAIN_BREAK, EXTENDED. WATCH ve SETUP takip edilmez — SETUP'ta henüz
+# fiyat hiçbir seviyeyi kırmadığı için somut bir "giriş" yok, WATCH zaten
+# "aksiyon sinyali değildir" diye işaretleniyor, başarısını ölçmek
+# anlamsız olurdu.
+
+TRACKED_STAGES = {"LOCAL_BREAK", "MAIN_BREAK", "EXTENDED"}
+
+
+def build_target_hit_message(ticker, position, current_price):
+    entry = position["entry"]
+    gain_pct = (current_price - entry) / entry * 100 if entry > 0 else 0.0
+    return (
+        f"🎉🎯🎉 *HEDEFE ULAŞILDI!* 🎉🎯🎉\n\n"
+        f"📌 *{ticker}*\n"
+        f"Giriş: {entry:.2f} TL  →  Güncel: {current_price:.2f} TL\n"
+        f"🎯 Hedef seviyesi ({position['target1']:.2f} TL) görüldü!\n\n"
+        f"📈 *KAZANÇ: +%{gain_pct:.1f}*\n\n"
+        f"_Bu sinyalin takibi burada kapatıldı._"
+    )
+
+
+def build_stop_hit_message(ticker, position, current_price):
+    entry = position["entry"]
+    loss_pct = (current_price - entry) / entry * 100 if entry > 0 else 0.0
+    sign = "-" if loss_pct < 0 else ""
+    return (
+        f"🛑 *STOP SEVİYESİ TETİKLENDİ* 🛑\n\n"
+        f"📌 *{ticker}*\n"
+        f"Giriş: {entry:.2f} TL  →  Güncel: {current_price:.2f} TL\n"
+        f"Stop seviyesi ({position['stop']:.2f} TL) tetiklendi.\n\n"
+        f"📉 *ZARAR: {sign}%{abs(loss_pct):.1f}*\n\n"
+        f"_Bu sinyalin takibi burada kapatıldı._"
+    )
+
+
+def check_open_positions(state, all_data):
+    """
+    Daha önce LOCAL_BREAK/MAIN_BREAK/EXTENDED ile açılmış (ve henüz
+    kapanmamış) takipteki her hisse için, bu turun güncel kapanış
+    fiyatına bakar. Hedefe ulaşmış ya da stop'a çarpmışsa özel bir
+    bildirim gönderir ve takibi kapatır. İkisi de olmamışsa hiçbir şey
+    göndermez, sessizce açık kalır.
+    """
+    closed = 0
+    for ticker, info in list(state.items()):
+        position = info.get("position")
+        if not position:
+            continue
+        if ticker not in all_data:
+            continue  # bu turda veri gelmedi, bir sonraki taramaya bırakılır
+
+        try:
+            current_price = float(all_data[ticker]["Close"].iloc[-1])
+        except Exception:
+            continue
+
+        if current_price >= position["target1"]:
+            send_telegram(build_target_hit_message(ticker, position, current_price))
+            state[ticker]["position"] = None
+            closed += 1
+            time.sleep(0.5)
+        elif current_price <= position["stop"]:
+            send_telegram(build_stop_hit_message(ticker, position, current_price))
+            state[ticker]["position"] = None
+            closed += 1
+            time.sleep(0.5)
+
+    return closed
+
+# ============================================================
+# GÜNLÜK ÖZET (v4 — yeni)
+# ============================================================
+
+def build_summary_message(stage_counts, total_scanned, total_universe, open_positions_count):
+    return (
+        f"📊 *TARAMA ÖZETİ*\n"
+        f"{market_session_label()}\n\n"
+        f"🔍 Taranan: {total_scanned}/{total_universe} hisse\n\n"
+        f"🟢 Ana Kırılım: {stage_counts.get('MAIN_BREAK', 0)}\n"
+        f"🟡 Yerel Kırılım: {stage_counts.get('LOCAL_BREAK', 0)}\n"
+        f"🔴 Aşırı Uzamış: {stage_counts.get('EXTENDED', 0)}\n"
+        f"🟠 Kurulum Hazır: {stage_counts.get('SETUP', 0)}\n"
+        f"🔵 İzleme: {stage_counts.get('WATCH', 0)}\n\n"
+        f"📌 Şu an takip edilen açık sinyal: {open_positions_count}"
+    )
+
+# ============================================================
 # ANA TARAMA
 # ============================================================
 
@@ -850,6 +976,11 @@ def main():
             "Bu çalıştırmadaki sinyaller güvenilir olmayabilir."
         )
         log.warning("Veri başarı oranı düşük.")
+
+    # --- v4 YENİ: önce açık takipteki pozisyonları kontrol et (hedef/stop) ---
+    log.info("📌 Açık takipteki sinyaller kontrol ediliyor...")
+    closed_count = check_open_positions(state, all_data)
+    log.info(f"   {closed_count} takip kapatıldı (hedef/stop).")
 
     results = []
 
@@ -924,7 +1055,30 @@ def main():
             sent_counts[stage] += 1
             time.sleep(0.5)
 
+            # v4 YENİ: sadece gerçekten tetiklenmiş (LOCAL_BREAK/MAIN_BREAK/EXTENDED)
+            # ve YENİ gönderilen bir sinyal için takip pozisyonu aç/değiştir.
+            # should_notify=False olan (yani mesaj gönderilmeyen, sadece aynı
+            # aşamada kalan) durumlarda ESKİ pozisyon dokunulmadan kalır.
+            if stage in TRACKED_STAGES:
+                l = item["levels"]
+                new_position = {
+                    "entry": l["entry_trigger"], "stop": l["stop"],
+                    "target1": l["target1"], "target2": l["target2"],
+                    "opened_date": datetime.now().strftime("%Y-%m-%d"),
+                }
+                update_state(state, item["ticker"], stage, item["score"],
+                             item["confluence"]["rvol"], item["close"], position=new_position)
+                continue  # update_state zaten çağrıldı, aşağıdaki genel çağrıyı atla
+
         update_state(state, item["ticker"], stage, item["score"], item["confluence"]["rvol"], item["close"])
+
+    # --- v4 YENİ: günlük özet mesajı (her taramada gönderilir, sessizlik ile arıza ayrımı için) ---
+    stage_counts_all = {}
+    for item in results:
+        stage_counts_all[item["stage"]] = stage_counts_all.get(item["stage"], 0) + 1
+    open_positions_count = sum(1 for v in state.values() if v.get("position"))
+    summary_msg = build_summary_message(stage_counts_all, len(all_data), len(BIST_TUM_LISTESI), open_positions_count)
+    send_telegram(summary_msg)
 
     save_state(state)
 
