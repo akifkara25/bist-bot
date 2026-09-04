@@ -44,7 +44,6 @@ MAX_DAILY_JUMP_PCT = 60.0
 MIN_CONFLUENCE_STRONG = 3
 MIN_CONFLUENCE_WATCH = 2
 MIN_RR = 1.3
-MIN_RR_WATCH = 1.0
 
 # Düzeltme (pullback) parametreleri
 PULLBACK_MIN_PCT = 4.0
@@ -422,7 +421,6 @@ def trend_filter(df):
     above20 = cp > float(sma20.iloc[-1])
     above50 = cp > float(sma50.iloc[-1])
     above200 = cp > float(sma200.iloc[-1])
-    sma20_rising = float(sma20.iloc[-1]) > float(sma20.iloc[-5])
     sma50_rising = float(sma50.iloc[-1]) > float(sma50.iloc[-10])
     golden = float(sma50.iloc[-1]) > float(sma200.iloc[-1])
 
@@ -433,7 +431,7 @@ def trend_filter(df):
 
     return {
         "ok": ok, "above20": above20, "above50": above50, "above200": above200,
-        "sma20_rising": sma20_rising, "sma50_rising": sma50_rising, "golden": golden,
+        "sma50_rising": sma50_rising, "golden": golden,
         "hh": structure["hh"], "hl": structure["hl"], "weekly_ok": weekly_ok,
     }
 
@@ -934,10 +932,12 @@ def check_open_positions(state, all_data):
 # GÜNLÜK ÖZET (v4 — yeni)
 # ============================================================
 
-def build_summary_message(stage_counts, total_scanned, total_universe, open_positions_count):
+def build_summary_message(stage_counts, total_scanned, total_universe, open_positions_count, regime_ok):
+    regime_text = "Güçlü ✅ (XU100 > 50G ort.)" if regime_ok else "Zayıf ⚠️ (XU100 < 50G ort.)"
     return (
         f"📊 *TARAMA ÖZETİ*\n"
-        f"{market_session_label()}\n\n"
+        f"{market_session_label()}\n"
+        f"🌍 Genel piyasa: {regime_text}\n\n"
         f"🔍 Taranan: {total_scanned}/{total_universe} hisse\n\n"
         f"🟢 Ana Kırılım: {stage_counts.get('MAIN_BREAK', 0)}\n"
         f"🟡 Yerel Kırılım: {stage_counts.get('LOCAL_BREAK', 0)}\n"
@@ -1077,7 +1077,7 @@ def main():
     for item in results:
         stage_counts_all[item["stage"]] = stage_counts_all.get(item["stage"], 0) + 1
     open_positions_count = sum(1 for v in state.values() if v.get("position"))
-    summary_msg = build_summary_message(stage_counts_all, len(all_data), len(BIST_TUM_LISTESI), open_positions_count)
+    summary_msg = build_summary_message(stage_counts_all, len(all_data), len(BIST_TUM_LISTESI), open_positions_count, regime_ok)
     send_telegram(summary_msg)
 
     save_state(state)
