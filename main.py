@@ -1,12 +1,23 @@
 import os
 import time
 import json
-import sqlite3
+import logging
 import requests
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta
+from scipy.signal import argrelextrema
+
+# ============================================================
+# LOGLAMA
+# ============================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("bist_scanner")
 
 # ============================================================
 # AYARLAR
@@ -16,25 +27,55 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
 MIN_TURNOVER_TL = 15_000_000
-DB_FILE = "signals_v9_trend_pullback.db"
-MAX_ALERTS = 10
-MAX_WATCH_ALERTS = 6        # İzleme listesinden en fazla kaç mesaj gönderilsin
+STATE_FILE = "state.json"
+MAX_TRIGGER_ALERTS = 8
+MAX_SETUP_ALERTS = 8
+MAX_WATCH_ALERTS = 6
+MAX_BREAKOUT_ALERTS = 4
 
-# --- GÜÇLÜ SİNYAL eşikleri (yüksek güven, "aksiyon alınabilir") ---
-MIN_CONFLUENCE = 3          # 4 kategoriden en az kaçı onaylamalı
-MIN_RR = 1.3                # Bu R/R oranının altındaki sinyaller elenir
+# --- Veri kalitesi eşikleri ---
+MAX_STALE_DAYS = 5
+MIN_SUCCESS_RATE = 0.6
+MAX_DAILY_JUMP_PCT = 60.0
 
-# --- İZLEME LİSTESİ eşikleri (daha gevşek, "değerlendirilebilir", kesin değil) ---
+# --- Confluence eşikleri (5 kategori üzerinden; NOT: backtest edilmedi, ilk mantıklı tahmin) ---
+MIN_CONFLUENCE_STRONG = 3
 MIN_CONFLUENCE_WATCH = 2
+MIN_RR = 1.3
 MIN_RR_WATCH = 1.0
 
 # Düzeltme (pullback) parametreleri
-PULLBACK_MIN_PCT = 4.0      # Tepeden en az %4 geri çekilme
-PULLBACK_MAX_PCT = 22.0     # %22'den fazla düşüş = trend bozulmuş sayılır
-LOOKBACK_SWING = 60         # Tepe/dip aramak için gün penceresi
+PULLBACK_MIN_PCT = 4.0
+PULLBACK_MAX_PCT = 22.0
+LOOKBACK_SWING = 60          # pullback / RSI divergence için gün penceresi
+LOOKBACK_STRUCTURE = 120     # HH/HL ve direnç taraması için daha geniş pencere
+SWING_ORDER = 3              # bir noktanın "swing" sayılması için her yanında kaç gün karşılaştırılsın
+
+# Volatilite sıkışması (Bollinger Band Width)
+BBW_LOOKBACK = 120
+BBW_SQUEEZE_PERCENTILE = 20  # son 120 günün en dar %20'lik dilimindeyse "sıkışma"
+
+# Relatif güç (XU100'e göre)
+RS_LOOKBACK = 20
+
+# Kırılım sonrası "çok geç kalındı" eşiği
+BREAKOUT_EXTENDED_PCT = 8.0
+
+# Skor ağırlıkları — HENÜZ BACKTEST EDİLMEDİ. İlk mantıklı tahmin; Faz 3'te
+# geçmiş veriyle optimize edilecek. Toplamı 1.0 (ana bileşenler 90 puanlık,
+# R/R kalitesi ayrı 10 puanlık bonus).
+SCORE_WEIGHTS = {
+    "trend": 0.20,
+    "pullback": 0.15,
+    "momentum": 0.20,
+    "volume": 0.15,
+    "structure": 0.10,
+    "squeeze": 0.05,
+    "relative_strength": 0.15,
+}
 
 # ============================================================
-# BIST TÜM LİSTESİ (değişmedi, kısaltıldı gösterim için)
+# BIST TÜM LİSTESİ
 # ============================================================
 
 _raw_bist_list = [
@@ -90,46 +131,37 @@ _raw_bist_list = [
 BIST_TUM_LISTESI = sorted(set(t.strip().upper() for t in _raw_bist_list if t and t.strip()))
 
 # ============================================================
-# DATABASE (kalıcılık: GitHub Actions workflow'da cache+commit ile sağlanır — bkz. scan.yml)
+# STATE (JSON — kalıcılık workflow'da commit ile sağlanıyor)
 # ============================================================
 
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS stock_state (
-            ticker TEXT PRIMARY KEY,
-            last_tier TEXT,
-            last_score REAL,
-            last_rvol REAL,
-            last_close REAL,
-            last_date TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return {}
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        log.warning(f"state.json okunamadı, sıfırdan başlanıyor: {e}")
+        return {}
 
 
-def get_previous_state(ticker):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("SELECT last_tier, last_score, last_rvol, last_close, last_date FROM stock_state WHERE ticker=?", (ticker,))
-    row = cur.fetchone()
-    conn.close()
-    if row is None:
-        return None
-    return {"tier": row[0], "score": row[1], "rvol": row[2], "close": row[3], "date": row[4]}
+def save_state(state):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.error(f"state.json yazılamadı: {e}")
 
 
-def update_state(ticker, tier, score, rvol, close):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT OR REPLACE INTO stock_state (ticker, last_tier, last_score, last_rvol, last_close, last_date)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (ticker, tier, score, rvol, close, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    conn.commit()
-    conn.close()
+def get_previous_state(state, ticker):
+    return state.get(ticker)
+
+
+def update_state(state, ticker, stage, score, rvol, close):
+    state[ticker] = {
+        "stage": stage, "score": score, "rvol": rvol, "close": close,
+        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
 # ============================================================
 # TELEGRAM
@@ -142,12 +174,15 @@ def send_telegram(message):
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown", "disable_web_page_preview": True}
     try:
         r = requests.post(url, json=payload, timeout=15)
+        if r.status_code != 200:
+            log.error(f"Telegram gönderim hatası ({r.status_code}): {r.text[:300]}")
         return r.status_code == 200
-    except Exception:
+    except Exception as e:
+        log.error(f"Telegram gönderim istisnası: {e}")
         return False
 
 # ============================================================
-# VERİ ÇEKME (toplu + retry)
+# VERİ ÇEKME
 # ============================================================
 
 def clean_df(df):
@@ -173,37 +208,53 @@ def clean_df(df):
         return None
 
 
+def data_quality_check(df):
+    if df is None or df.empty:
+        return False, "boş veri"
+    last_date = df.index[-1]
+    if hasattr(last_date, "to_pydatetime"):
+        last_date = last_date.to_pydatetime()
+    if (datetime.now() - last_date.replace(tzinfo=None)) > timedelta(days=MAX_STALE_DAYS):
+        return False, f"veri çok eski ({last_date.date()})"
+    daily_change = df["Close"].pct_change().abs()
+    if (daily_change > MAX_DAILY_JUMP_PCT / 100).tail(LOOKBACK_SWING).any():
+        return False, "şüpheli tek günlük sıçrama"
+    if (df["Close"] <= 0).any() or (df["Volume"] < 0).any():
+        return False, "geçersiz fiyat/hacim"
+    return True, "ok"
+
+
 def batch_download(tickers, batch_size=40, retries=3, sleep_between=1.5):
-    """
-    500 hisseyi tek tek değil, gruplar halinde indirir.
-    Yahoo rate-limit'e takılan grupları retry eder.
-    Döner: {ticker: DataFrame}
-    """
     all_data = {}
     batches = [tickers[i:i + batch_size] for i in range(0, len(tickers), batch_size)]
 
     for bi, batch in enumerate(batches, start=1):
-        print(f"  Grup {bi}/{len(batches)} indiriliyor ({len(batch)} hisse)...")
+        log.info(f"  Grup {bi}/{len(batches)} indiriliyor ({len(batch)} hisse)...")
         attempt = 0
         while attempt < retries:
             try:
                 data = yf.download(
                     tickers=batch, period="1y", interval="1d",
-                    group_by="ticker", progress=False, auto_adjust=False,
+                    group_by="ticker", progress=False, auto_adjust=True,
                     threads=True
                 )
                 for t in batch:
                     try:
                         sub = data[t] if len(batch) > 1 else data
                         cdf = clean_df(sub)
-                        if cdf is not None and len(cdf) >= 70:
-                            all_data[t] = cdf
+                        if cdf is None or len(cdf) < 70:
+                            continue
+                        ok, reason = data_quality_check(cdf)
+                        if not ok:
+                            log.debug(f"{t}: veri kalitesi reddi ({reason})")
+                            continue
+                        all_data[t] = cdf
                     except Exception:
                         continue
                 break
             except Exception as e:
                 attempt += 1
-                print(f"    Grup hata (deneme {attempt}/{retries}): {e}")
+                log.warning(f"Grup hata (deneme {attempt}/{retries}): {e}")
                 time.sleep(sleep_between * attempt)
         time.sleep(sleep_between)
 
@@ -212,14 +263,14 @@ def batch_download(tickers, batch_size=40, retries=3, sleep_between=1.5):
 
 def get_market_data():
     try:
-        df = yf.download("XU100.IS", period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
+        df = yf.download("XU100.IS", period="1y", interval="1d", progress=False, auto_adjust=True, threads=False)
         df = clean_df(df)
         return df if df is not None else None
     except Exception:
         return None
 
 # ============================================================
-# İNDİKATÖRLER
+# TEMEL İNDİKATÖRLER
 # ============================================================
 
 def calc_rsi(series, period=14):
@@ -253,248 +304,496 @@ def calc_atr(df, period=14):
 
 
 def calc_cmf(df, period=20):
-    """Chaikin Money Flow - hacmi kapanışın mum içindeki konumuna göre ağırlıklandırır."""
     high, low, close, volume = df["High"], df["Low"], df["Close"], df["Volume"]
     mfm = ((close - low) - (high - close)) / (high - low).replace(0, np.nan)
     mfv = mfm * volume
     cmf = mfv.rolling(period).sum() / volume.rolling(period).sum()
     return cmf.fillna(0)
 
+
+def calc_bbw(close, period=20, num_std=2):
+    """Bollinger Band Width: bant genişliği / orta bant. Düşük değer = sıkışma."""
+    sma = close.rolling(period).mean()
+    std = close.rolling(period).std()
+    upper = sma + num_std * std
+    lower = sma - num_std * std
+    return (upper - lower) / sma
+
 # ============================================================
-# 1) TREND FİLTRESİ (günlük SMA50/SMA200 ile)
+# SWING (GERÇEK TEPE/DİP) TESPİTİ — scipy ile
 # ============================================================
 
-def trend_filter(close):
+def _dedupe_consecutive(idx_array):
+    """Düz (plateau) bölgelerde argrelextrema'nın ürettiği bitişik indeksleri
+    tek bir noktaya indirger (her grubun son elemanını tutar)."""
+    if len(idx_array) == 0:
+        return idx_array
+    groups, current = [], [idx_array[0]]
+    for x in idx_array[1:]:
+        if x - current[-1] <= 1:
+            current.append(x)
+        else:
+            groups.append(current)
+            current = [x]
+    groups.append(current)
+    return np.array([g[-1] for g in groups])
+
+
+def find_swings(series, order=SWING_ORDER, mode="max"):
+    """Gerçek swing high/low noktalarının index'lerini döner (her yanında
+    `order` kadar barla karşılaştırılarak). Sabit pencere maksimumu/minimumu
+    DEĞİL, gerçek dönüş noktalarını bulur."""
+    if len(series) < order * 2 + 1:
+        return pd.Index([])
+    arr = series.values.astype(float)
+    comp = np.greater_equal if mode == "max" else np.less_equal
+    idx = argrelextrema(arr, comp, order=order)[0]
+    idx = _dedupe_consecutive(idx)
+    return series.index[idx]
+
+# ============================================================
+# 1) TREND: SMA20/50/200 + eğim + haftalık teyit + HH/HL yapısı
+# ============================================================
+
+def weekly_trend_ok(df):
+    try:
+        w = df.resample("W-FRI").agg({"Close": "last"}).dropna()
+        if len(w) < 15:
+            return True  # yeterli haftalık veri yok, engelleme
+        close_w = w["Close"]
+        sma10w = close_w.rolling(10).mean()
+        if sma10w.isna().iloc[-1]:
+            return True
+        return bool(close_w.iloc[-1] > sma10w.iloc[-1])
+    except Exception:
+        return True
+
+
+def hh_hl_structure(high, low, lookback=LOOKBACK_STRUCTURE, order=SWING_ORDER):
+    h = high.tail(lookback)
+    l = low.tail(lookback)
+    sh_idx = find_swings(h, order, "max")
+    sl_idx = find_swings(l, order, "min")
+    sh_vals = h.loc[sh_idx]
+    sl_vals = l.loc[sl_idx]
+    hh = bool(len(sh_vals) >= 2 and sh_vals.iloc[-1] > sh_vals.iloc[-2])
+    hl = bool(len(sl_vals) >= 2 and sl_vals.iloc[-1] > sl_vals.iloc[-2])
+    return {"hh": hh, "hl": hl, "swing_highs": sh_vals, "swing_lows": sl_vals}
+
+
+def trend_filter(df):
+    close, high, low = df["Close"], df["High"], df["Low"]
     if len(close) < 210:
         return {"ok": False, "reason": "yetersiz veri"}
 
+    sma20 = close.rolling(20).mean()
     sma50 = close.rolling(50).mean()
     sma200 = close.rolling(200).mean()
     cp = float(close.iloc[-1])
 
+    above20 = cp > float(sma20.iloc[-1])
     above50 = cp > float(sma50.iloc[-1])
     above200 = cp > float(sma200.iloc[-1])
+    sma20_rising = float(sma20.iloc[-1]) > float(sma20.iloc[-5])
     sma50_rising = float(sma50.iloc[-1]) > float(sma50.iloc[-10])
     golden = float(sma50.iloc[-1]) > float(sma200.iloc[-1])
 
-    ok = above200 and sma50_rising and golden
+    structure = hh_hl_structure(high, low)
+    weekly_ok = weekly_trend_ok(df)
+
+    # Tam onay: SMA200 üzeri + SMA50 yükseliyor + golden + (higher-low YA DA SMA50 üzeri) + haftalık teyit
+    ok = above200 and sma50_rising and golden and (structure["hl"] or above50) and weekly_ok
+
     return {
-        "ok": ok, "above50": above50, "above200": above200,
-        "sma50_rising": sma50_rising, "golden": golden,
-        "sma50": float(sma50.iloc[-1]), "sma200": float(sma200.iloc[-1])
+        "ok": ok, "above20": above20, "above50": above50, "above200": above200,
+        "sma20_rising": sma20_rising, "sma50_rising": sma50_rising, "golden": golden,
+        "hh": structure["hh"], "hl": structure["hl"], "weekly_ok": weekly_ok,
     }
 
 # ============================================================
-# 2) DÜZELTME (PULLBACK) TESPİTİ
+# 2) DÜZELTME (PULLBACK) — gerçek swing high/low bazlı
 # ============================================================
 
-def detect_pullback(high, low, close):
+def detect_pullback(high, low, close, lookback=LOOKBACK_SWING, order=SWING_ORDER, context_buffer=30):
     """
-    Son LOOKBACK_SWING gün içindeki tepeyi bulur, oradan şu ana kadarki
-    geri çekilme yüzdesini hesaplar. Ayrıca düzeltme sırasında hacmin
-    azalıp azalmadığını (sağlıklı pullback imzası) döner.
+    `lookback` gün içindeki gerçek tepe/dip aranır, ama swing tespitinin sınırda
+    yanlış çalışmaması için `context_buffer` kadar ekstra geçmiş veriyle
+    (sol bağlam) çalışılır — tepe/dip yine de son `lookback` gün içinden seçilir.
     """
-    if len(close) < LOOKBACK_SWING:
+    window = lookback + context_buffer
+    if len(close) < window:
         return {"ok": False}
 
-    window_high = high.tail(LOOKBACK_SWING)
-    peak_idx = window_high.idxmax()
-    peak_price = float(window_high.max())
+    h = high.tail(window)
+    l = low.tail(window)
+
+    sh_idx = find_swings(h, order, "max")
+    if len(sh_idx) == 0:
+        return {"ok": False}
+
+    cutoff = h.index[-lookback]
+    recent_peaks = [idx for idx in sh_idx if idx >= cutoff]
+    candidates = recent_peaks if recent_peaks else list(sh_idx)
+    # En SON değil, en YÜKSEK (en anlamlı) swing high tercih edilir — toparlanma
+    # sürecindeki küçük gürültü tepeleri asıl düzeltme başlangıcıyla karışmasın.
+    peak_idx = h.loc[candidates].idxmax()
+    peak_price = float(h.loc[peak_idx])
+    if peak_price <= 0:
+        return {"ok": False}
+
+    after_peak_low = l.loc[peak_idx:]
+    if after_peak_low.empty:
+        return {"ok": False}
+    trough_idx = after_peak_low.idxmin()
+    trough_price = float(after_peak_low.min())
+
     cp = float(close.iloc[-1])
-
-    # tepeden bugüne kadar oluşan en düşük nokta (düzeltmenin dibi)
-    after_peak_low = low.loc[peak_idx:].min()
-    if pd.isna(after_peak_low) or peak_price <= 0:
-        return {"ok": False}
-
-    drawdown_pct = (peak_price - float(after_peak_low)) / peak_price * 100
-    recovery_from_low_pct = (cp - float(after_peak_low)) / float(after_peak_low) * 100 if after_peak_low > 0 else 0
-
+    drawdown_pct = (peak_price - trough_price) / peak_price * 100
+    recovery_from_low_pct = (cp - trough_price) / trough_price * 100 if trough_price > 0 else 0
     healthy_depth = PULLBACK_MIN_PCT <= drawdown_pct <= PULLBACK_MAX_PCT
-    is_recovering = cp > float(after_peak_low) * 1.01  # dipten en az %1 toparlanmış
+
+    # Toparlanma teyidi — SADECE %1 değil, üçünden biri yeterli:
+    # (a) dipten belirgin toparlanma, (b) dip sonrası higher-low oluşmuş,
+    # (c) fiyat son günlerin zirvesine yaklaşmış/geçmiş
+    after_trough_low = l.loc[trough_idx:]
+    sl_after = find_swings(after_trough_low, order, "min")
+    higher_low_after_trough = False
+    if len(sl_after) >= 2:
+        vals = after_trough_low.loc[sl_after]
+        higher_low_after_trough = bool(vals.iloc[-1] > vals.iloc[-2])
+
+    near_recent_high = cp >= float(h.tail(5).max()) * 0.98
+    solid_bounce = recovery_from_low_pct >= 3.0
+
+    is_recovering = solid_bounce or higher_low_after_trough or near_recent_high
 
     return {
         "ok": healthy_depth and is_recovering,
-        "peak_price": peak_price,
-        "trough_price": float(after_peak_low),
-        "drawdown_pct": drawdown_pct,
-        "recovery_from_low_pct": recovery_from_low_pct,
-        "peak_idx": peak_idx
+        "peak_price": peak_price, "peak_idx": peak_idx,
+        "trough_price": trough_price, "trough_idx": trough_idx,
+        "drawdown_pct": drawdown_pct, "recovery_from_low_pct": recovery_from_low_pct,
+        "higher_low_after_trough": higher_low_after_trough,
+        "near_recent_high": near_recent_high,
     }
 
-
-def volume_during_pullback(volume, peak_idx, pullback_info):
-    """Düzeltme sırasında hacim gerçekten azaldı mı (satış baskısı zayıflıyor mu)?"""
-    try:
-        during = volume.loc[peak_idx:]
-        if len(during) < 4:
-            return False
-        first_half = during.iloc[:len(during) // 2].mean()
-        second_half = during.iloc[len(during) // 2:].mean()
-        return second_half < first_half
-    except Exception:
-        return False
-
 # ============================================================
-# 3) TOPARLANMA / CONFLUENCE SİSTEMİ
+# 3) MOMENTUM: gerçek swing diplerinde RSI divergence + MACD
 # ============================================================
 
-def rsi_bullish_divergence(close, rsi, peak_idx):
-    """Fiyat düşük dip yaparken RSI daha yüksek dip yapıyor mu (klasik bullish divergence)."""
+def rsi_bullish_divergence(close, rsi, peak_idx, order=SWING_ORDER):
     try:
         seg_close = close.loc[peak_idx:]
         seg_rsi = rsi.loc[peak_idx:]
-        if len(seg_close) < 6:
+        if len(seg_close) < order * 2 + 3:
             return False
-        mid = len(seg_close) // 2
-        low1_idx = seg_close.iloc[:mid].idxmin()
-        low2_idx = seg_close.iloc[mid:].idxmin()
-        if low1_idx == low2_idx:
+        lows_idx = find_swings(seg_close, order, "min")
+        if len(lows_idx) < 2:
             return False
-        price_lower = seg_close[low2_idx] < seg_close[low1_idx]
-        rsi_higher = seg_rsi[low2_idx] > seg_rsi[low1_idx]
+        low1, low2 = lows_idx[-2], lows_idx[-1]
+        price_lower = seg_close.loc[low2] < seg_close.loc[low1]
+        rsi_higher = seg_rsi.loc[low2] > seg_rsi.loc[low1]
         return bool(price_lower and rsi_higher)
     except Exception:
         return False
 
 
-def evaluate_confluence(df, pullback_info):
-    """
-    4 bağımsız kategori kontrol edilir:
-    1. Hacim/para girişi (rvol + CMF)
-    2. Momentum dönüşü (RSI divergence veya güçlü RSI ivmesi)
-    3. MACD histogram dönüşü
-    4. Fiyat yapısı (higher-low, OBV teyidi)
-    Her kategori True/False döner, kaç tanesinin onayladığı sayılır.
-    """
+def macd_confirm(hist, macd_line, signal_line):
+    if len(hist) < 6:
+        return False
+    accelerating = (hist.iloc[-1] - hist.iloc[-2]) > (hist.iloc[-2] - hist.iloc[-3])
+    rising = hist.iloc[-1] > hist.iloc[-3]
+    recent_cross = False
+    for i in range(1, 5):
+        if len(macd_line) > i + 1 and macd_line.iloc[-i] > signal_line.iloc[-i] and macd_line.iloc[-i - 1] <= signal_line.iloc[-i - 1]:
+            recent_cross = True
+            break
+    return bool((rising and accelerating) or recent_cross)
+
+# ============================================================
+# 4) HACİM: düşüşte daralma + toparlanmada artış + OBV/CMF uyumu
+# ============================================================
+
+def volume_profile(volume, peak_idx, trough_idx):
+    try:
+        decline = volume.loc[peak_idx:trough_idx]
+        recovery = volume.loc[trough_idx:]
+        decline_shrank = False
+        if len(decline) >= 4:
+            mid = len(decline) // 2
+            decline_shrank = decline.iloc[mid:].mean() < decline.iloc[:mid].mean()
+        recovery_rising = False
+        if len(recovery) >= 4:
+            mid = len(recovery) // 2
+            recovery_rising = recovery.iloc[mid:].mean() > recovery.iloc[:mid].mean()
+        elif len(recovery) >= 2:
+            recovery_rising = recovery.iloc[-1] > recovery.mean()
+        return bool(decline_shrank), bool(recovery_rising)
+    except Exception:
+        return False, False
+
+# ============================================================
+# 5) RELATİF GÜÇ (XU100'e göre)
+# ============================================================
+
+def relative_strength(close, xu100_close, lookback=RS_LOOKBACK):
+    try:
+        if xu100_close is None:
+            return {"ok": True, "rs_change_pct": 0.0, "available": False}
+        aligned = pd.concat([close, xu100_close], axis=1, join="inner")
+        aligned.columns = ["stock", "xu100"]
+        if len(aligned) < lookback + 5:
+            return {"ok": True, "rs_change_pct": 0.0, "available": False}
+        ratio = aligned["stock"] / aligned["xu100"]
+        rs_now = float(ratio.iloc[-1])
+        rs_before = float(ratio.iloc[-lookback])
+        change_pct = (rs_now - rs_before) / rs_before * 100 if rs_before else 0.0
+        return {"ok": bool(change_pct > 0), "rs_change_pct": change_pct, "available": True}
+    except Exception:
+        return {"ok": True, "rs_change_pct": 0.0, "available": False}
+
+# ============================================================
+# 6) CONFLUENCE (5 kategori)
+# ============================================================
+
+def evaluate_confluence(df, pullback):
     close, high, low, volume = df["Close"], df["High"], df["Low"], df["Volume"]
-    peak_idx = pullback_info["peak_idx"]
+    peak_idx, trough_idx = pullback["peak_idx"], pullback["trough_idx"]
 
     rsi = calc_rsi(close)
-    _, _, hist = calc_macd(close)
+    macd_line, signal_line, hist = calc_macd(close)
     obv = calc_obv(close, volume)
     cmf = calc_cmf(df)
 
     checks = {}
 
-    # 1) Hacim / para girişi
+    decline_shrank, recovery_rising = volume_profile(volume, peak_idx, trough_idx)
     avg20 = volume.iloc[-21:-1].mean()
     rvol = float(volume.iloc[-1] / avg20) if avg20 > 0 else 1.0
-    vol_shrank_in_pullback = volume_during_pullback(volume, peak_idx, pullback_info)
     cmf_positive = float(cmf.iloc[-1]) > 0
-    checks["volume"] = bool((rvol >= 1.15 or cmf_positive) and vol_shrank_in_pullback)
+    checks["hacim"] = bool(decline_shrank and (recovery_rising or rvol >= 1.15 or cmf_positive))
 
-    # 2) Momentum dönüşü
     divergence = rsi_bullish_divergence(close, rsi, peak_idx)
     rsi_now = float(rsi.iloc[-1])
     rsi_turning = rsi.iloc[-1] > rsi.iloc[-3] > rsi.iloc[-5] if len(rsi) >= 6 else False
     checks["momentum"] = bool(divergence or (rsi_turning and 40 <= rsi_now <= 68))
 
-    # 3) MACD dönüşü
-    macd_turning = float(hist.iloc[-1]) > float(hist.iloc[-3]) if len(hist) >= 4 else False
-    checks["macd"] = bool(macd_turning)
+    checks["macd"] = macd_confirm(hist, macd_line, signal_line)
 
-    # 4) Fiyat yapısı (higher-low + OBV teyidi)
-    hl = detect_higher_lows(low)
+    structure = hh_hl_structure(high, low)
     obv5 = obv.tail(5).mean()
     obv20 = obv.iloc[-21:-1].mean() if len(obv) >= 21 else obv5
     obv_confirms = obv5 > obv20
-    checks["structure"] = bool(hl or obv_confirms)
+    checks["yapi"] = bool(structure["hl"] or obv_confirms)
 
-    confluence_count = sum(checks.values())
+    bbw = calc_bbw(close)
+    squeeze = False
+    recent_bbw = bbw.tail(BBW_LOOKBACK).dropna()
+    if len(recent_bbw) >= 30 and not pd.isna(bbw.iloc[-1]):
+        threshold = np.percentile(recent_bbw, BBW_SQUEEZE_PERCENTILE)
+        squeeze = bool(bbw.iloc[-1] <= threshold)
+    checks["sikisma"] = squeeze  # bonus niteliğinde, zorunlu şart değil
+
+    confluence_count = sum(v for k, v in checks.items() if k != "sikisma")  # ana 4 kategori
 
     return {
-        "checks": checks,
-        "count": confluence_count,
-        "rvol": rvol,
-        "cmf": float(cmf.iloc[-1]),
-        "divergence": divergence,
-        "rsi": rsi_now,
-        "hist": float(hist.iloc[-1]),
-        "higher_lows": hl,
-        "obv_confirms": obv_confirms
+        "checks": checks, "count": confluence_count, "rvol": rvol,
+        "cmf": float(cmf.iloc[-1]), "divergence": divergence, "rsi": rsi_now,
+        "decline_shrank": decline_shrank, "recovery_rising": recovery_rising,
+        "squeeze": squeeze, "obv_confirms": obv_confirms,
     }
 
+# ============================================================
+# 7) DİRENÇ SEVİYELERİ (birden fazla gerçek swing high)
+# ============================================================
 
-def detect_higher_lows(low_series):
-    if len(low_series) < 15:
-        return False
-    lows = low_series.tail(15).values
-    swing_lows = [lows[i] for i in range(1, len(lows) - 1) if lows[i] < lows[i - 1] and lows[i] <= lows[i + 1]]
-    if len(swing_lows) < 2:
-        return False
-    return swing_lows[-1] > swing_lows[-2]
+def find_resistances(high, close, lookback=LOOKBACK_STRUCTURE, order=SWING_ORDER):
+    h = high.tail(lookback)
+    sh_idx = find_swings(h, order, "max")
+    sh_vals = h.loc[sh_idx].sort_values()
+    cp = float(close.iloc[-1])
+    above = sh_vals[sh_vals > cp * 1.005]
+    nearest = float(above.iloc[0]) if len(above) >= 1 else None
+    second = float(above.iloc[1]) if len(above) >= 2 else None
+    return nearest, second
 
 # ============================================================
-# 4) PİYASA REJİMİ FİLTRESİ
+# 8) GİRİŞ / STOP / HEDEF SEVİYELERİ (iki kademeli giriş)
+# ============================================================
+
+def calc_levels(df, pullback, resistances):
+    close, high = df["Close"], df["High"]
+    atr = float(calc_atr(df).iloc[-1])
+    trough = pullback["trough_price"]
+
+    # Erken giriş bölgesi: dip civarı — agresif/kademeli pozisyon için
+    entry_early_low = trough * 1.005
+    entry_early_high = trough * 1.05
+
+    # Kırılım teyit seviyesi: son günlerin zirvesinin hafif üzeri — asıl tetik
+    recent_high = float(high.tail(3).max())
+    cp = float(close.iloc[-1])
+    entry_trigger = max(recent_high * 1.001, cp)
+
+    atr_stop = entry_trigger - 1.5 * atr
+    stop = min(trough * 0.985, atr_stop) if trough > 0 else atr_stop
+    if stop >= entry_trigger:
+        stop = entry_trigger - 1.5 * atr
+
+    risk = entry_trigger - stop
+    if risk <= 0:
+        return None
+
+    nearest_res, second_res = resistances
+    target1 = nearest_res if (nearest_res and nearest_res > entry_trigger) else entry_trigger + 2 * risk
+    target2 = second_res if (second_res and second_res > target1) else entry_trigger + 3 * risk
+
+    rr1 = (target1 - entry_trigger) / risk
+    rr2 = (target2 - entry_trigger) / risk
+
+    return {
+        "entry_early_low": entry_early_low, "entry_early_high": entry_early_high,
+        "entry_trigger": entry_trigger, "stop": stop,
+        "target1": target1, "target2": target2, "target1_is_real_resistance": nearest_res is not None,
+        "risk_pct": (risk / entry_trigger) * 100, "rr1": rr1, "rr2": rr2,
+    }
+
+# ============================================================
+# 9) PİYASA REJİMİ
 # ============================================================
 
 def market_regime_ok(xu100_df):
     if xu100_df is None or len(xu100_df) < 60:
-        return True  # veri yoksa filtreyi devre dışı bırak, botu tamamen durdurma
+        return True
     close = xu100_df["Close"]
     sma50 = close.rolling(50).mean()
     return float(close.iloc[-1]) > float(sma50.iloc[-1])
 
 # ============================================================
-# 5) GİRİŞ / STOP / HEDEF SEVİYELERİ
+# 10) SKOR (0-100) — bileşenler + R/R bonusu
 # ============================================================
 
-def calc_levels(df, pullback_info, resistance):
-    close, high, low = df["Close"], df["High"], df["Low"]
-    cp = float(close.iloc[-1])
-    atr = float(calc_atr(df).iloc[-1])
+def compute_score(trend, pullback, checks, rs, rr1):
+    trend_flags = [trend["above20"], trend["above50"], trend["above200"], trend["sma50_rising"],
+                   trend["golden"], trend["weekly_ok"], trend["hh"], trend["hl"]]
+    trend_score = 100 * sum(bool(x) for x in trend_flags) / len(trend_flags)
 
-    # Giriş: son birkaç günün en yükseği (kırılım teyidi) ile şu anki fiyatın ortalaması
-    recent_high = float(high.tail(3).max())
-    entry = max(cp, recent_high * 0.995)
+    ideal_mid = (PULLBACK_MIN_PCT + PULLBACK_MAX_PCT) / 2
+    dist = abs(pullback["drawdown_pct"] - ideal_mid) / (PULLBACK_MAX_PCT - PULLBACK_MIN_PCT)
+    pullback_score = max(0.0, 100 * (1 - dist))
 
-    # Stop: düzeltmenin dibi ile ATR bazlı mesafenin daha temkinlisi
-    trough = pullback_info["trough_price"]
-    atr_stop = entry - 1.5 * atr
-    stop = min(trough * 0.985, atr_stop) if trough > 0 else atr_stop
-    if stop >= entry:
-        stop = entry - 1.5 * atr
+    momentum_score = 100 if checks["momentum"] and checks["macd"] else (60 if (checks["momentum"] or checks["macd"]) else 25)
+    volume_score = 100 if checks["hacim"] else (50 if (checks["decline_shrank"] if "decline_shrank" in checks else False) else 25)
+    structure_score = 100 if checks["yapi"] else 30
+    squeeze_score = 100 if checks["sikisma"] else 40
+    rs_score = max(0.0, min(100.0, 50 + rs.get("rs_change_pct", 0.0) * 5))
 
-    risk = entry - stop
-    if risk <= 0:
+    raw = (
+        trend_score * SCORE_WEIGHTS["trend"] +
+        pullback_score * SCORE_WEIGHTS["pullback"] +
+        momentum_score * SCORE_WEIGHTS["momentum"] +
+        volume_score * SCORE_WEIGHTS["volume"] +
+        structure_score * SCORE_WEIGHTS["structure"] +
+        squeeze_score * SCORE_WEIGHTS["squeeze"] +
+        rs_score * SCORE_WEIGHTS["relative_strength"]
+    )
+    rr_bonus = min(rr1, 4) * 2.5  # R/R kalitesine ek en fazla 10 puan
+    score = min(100.0, raw * 0.9 + rr_bonus)
+    return round(score, 1)
+
+# ============================================================
+# 11) DURUM MAKİNESİ: WATCH -> SETUP -> TRIGGER -> BREAKOUT
+# ============================================================
+
+def determine_stage(trend, pullback, confluence, rs, levels, cp):
+    loose_ok = pullback["ok"] and confluence["count"] >= MIN_CONFLUENCE_WATCH
+    if not loose_ok:
         return None
 
-    target1 = resistance if resistance > entry else entry + 2 * risk
-    target2 = entry + 3 * risk
+    strong_ok = trend["ok"] and confluence["count"] >= MIN_CONFLUENCE_STRONG and levels["rr1"] >= MIN_RR
 
-    rr1 = (target1 - entry) / risk
-    rr2 = (target2 - entry) / risk
+    triggered = cp >= levels["entry_trigger"]
+    extended = triggered and cp >= levels["entry_trigger"] * (1 + BREAKOUT_EXTENDED_PCT / 100)
 
-    return {
-        "entry": entry, "stop": stop, "target1": target1, "target2": target2,
-        "risk_pct": (risk / entry) * 100, "rr1": rr1, "rr2": rr2
-    }
+    if extended:
+        return "BREAKOUT"
+    if triggered:
+        return "TRIGGER"
+    if strong_ok:
+        return "SETUP"
+    return "WATCH"
+
+# ============================================================
+# MESAJ OLUŞTURMA
+# ============================================================
+
+STAGE_HEADERS = {
+    "WATCH":    ("🟡 *İZLEME*", "Erken aşama — sadece radarına girsin. Aksiyon sinyali değildir."),
+    "SETUP":    ("🟠 *KURULUM TAMAMLANIYOR*", "Kriterler güçlü ama kırılım henüz gerçekleşmedi. Kırılım teyit seviyesini izle."),
+    "TRIGGER":  ("⚡ *TETİKLENDİ*", "Kırılım teyit seviyesi geçildi — aksiyon anı. Yine de kendi teyidini almadan girme."),
+    "BREAKOUT": ("🔴 *GENİŞ HAREKET*", "Fiyat tetik seviyesinden belirgin uzaklaşmış — kovalama riski yüksek, dikkatli ol."),
+}
+
+
+def build_message(ticker, item):
+    stage = item["stage"]
+    header, stage_note = STAGE_HEADERS[stage]
+    c, l, tr, pb, rs = item["confluence"], item["levels"], item["trend"], item["pullback"], item["rs"]
+    checks_text = ", ".join([k for k, v in c["checks"].items() if v and k != "sikisma"]) or "yok"
+    squeeze_text = " + sıkışma ✓" if c["checks"]["sikisma"] else ""
+    rs_text = f"{rs['rs_change_pct']:+.1f}%" if rs.get("available") else "veri yetersiz"
+
+    msg = (
+        f"{header}\n_{stage_note}_\n\n"
+        f"📌 *Hisse:* `{ticker}`\n"
+        f"🎯 *Skor:* {item['score']:.1f}/100 | Confluence: {c['count']}/4 ({checks_text}{squeeze_text})\n"
+        f"📐 *Trend:* {'Tam onaylı ✅' if tr['ok'] else 'Kısmi ⚠️'} | Haftalık: {'✅' if tr['weekly_ok'] else '⚠️'}\n"
+        f"📊 *XU100'e göre relatif güç:* {rs_text}\n\n"
+        f"💰 *Fiyat:* {item['close']:.2f}\n"
+        f"📉 *Düzeltme:* %{pb['drawdown_pct']:.1f} (tepe {pb['peak_price']:.2f} → dip {pb['trough_price']:.2f})\n"
+        f"📈 *Dipten toparlanma:* %{pb['recovery_from_low_pct']:.1f}"
+        f"{' | Higher-low ✓' if pb['higher_low_after_trough'] else ''}\n"
+        f"🔀 *RSI:* {c['rsi']:.1f}{' (bullish divergence ✓)' if c['divergence'] else ''}\n"
+        f"💵 *CMF:* {c['cmf']:+.2f} | *RVOL:* {c['rvol']:.2f}x\n\n"
+        f"🟢 *Erken giriş bölgesi:* {l['entry_early_low']:.2f} - {l['entry_early_high']:.2f} (agresif, teyitsiz)\n"
+        f"🎯 *Kırılım teyit seviyesi:* {l['entry_trigger']:.2f} (asıl tetik)\n"
+        f"🛑 *Stop:* {l['stop']:.2f} (-%{l['risk_pct']:.1f})\n"
+        f"🎯 *Hedef 1:* {l['target1']:.2f} (R/R {l['rr1']:.1f}){'  [gerçek direnç]' if l['target1_is_real_resistance'] else '  [hesaplanmış]'}\n"
+        f"🎯 *Hedef 2:* {l['target2']:.2f} (R/R {l['rr2']:.1f})\n\n"
+        f"_Yatırım tavsiyesi değildir, teknik analiz özetidir. Skor ağırlıkları henüz backtest edilmedi._"
+    )
+    return msg
 
 # ============================================================
 # ANA TARAMA
 # ============================================================
 
 def main():
-    print("\n============================================")
-    print("🧠 BIST TREND+PULLBACK+CONFLUENCE ENGINE")
-    print("============================================\n")
+    log.info("============================================")
+    log.info("🧠 BIST TREND+PULLBACK+CONFLUENCE ENGINE v2")
+    log.info("============================================")
 
-    init_db()
-    print(f"📊 Taranacak toplam hisse: {len(BIST_TUM_LISTESI)}")
+    state = load_state()
+    log.info(f"📊 Taranacak toplam hisse: {len(BIST_TUM_LISTESI)}")
 
     xu100_df = get_market_data()
+    xu100_close = xu100_df["Close"] if xu100_df is not None else None
     regime_ok = market_regime_ok(xu100_df)
-    print(f"🌍 Piyasa rejimi (XU100 > SMA50): {'UYGUN ✅' if regime_ok else 'ZAYIF ⚠️ (filtre gevşetildi, dikkatli olun)'}")
+    log.info(f"🌍 Piyasa rejimi (XU100 > SMA50): {'UYGUN ✅' if regime_ok else 'ZAYIF ⚠️'}")
 
-    print("\n📥 Veri toplu indiriliyor...")
+    log.info("📥 Veri toplu indiriliyor...")
     all_data = batch_download(BIST_TUM_LISTESI)
-    print(f"✅ {len(all_data)}/{len(BIST_TUM_LISTESI)} hisse için veri alındı.\n")
+    success_rate = len(all_data) / len(BIST_TUM_LISTESI) if BIST_TUM_LISTESI else 0
+    log.info(f"✅ {len(all_data)}/{len(BIST_TUM_LISTESI)} hisse için veri alındı ({success_rate:.0%}).")
+
+    if success_rate < MIN_SUCCESS_RATE:
+        send_telegram(
+            "⚠️ *TARAMA ŞÜPHELİ*\n\n"
+            f"Sadece {len(all_data)}/{len(BIST_TUM_LISTESI)} hisse için veri alınabildi ({success_rate:.0%}).\n"
+            "Bu çalıştırmadaki sinyaller güvenilir olmayabilir."
+        )
+        log.warning("Veri başarı oranı düşük.")
 
     results = []
-
-    # Piyasa zayıfsa güçlü sinyal için eşik +1 sıkılaştırılır (izleme listesi etkilenmez)
-    strong_conf_needed = MIN_CONFLUENCE + (1 if not regime_ok else 0)
 
     for i, (ticker, df) in enumerate(all_data.items(), start=1):
         try:
@@ -506,9 +805,7 @@ def main():
             if turnover.tail(5).mean() < MIN_TURNOVER_TL:
                 continue
 
-            trend = trend_filter(close)
-            # En gevşek şart: en azından 200 günlük ortalamanın üzerinde olsun.
-            # Bu bile sağlanmıyorsa hisse "yükseliş trendi" tanımına hiç girmiyor demektir.
+            trend = trend_filter(df)
             if not trend.get("above200"):
                 continue
 
@@ -517,102 +814,77 @@ def main():
                 continue
 
             confluence = evaluate_confluence(df, pullback)
-
-            resistance_window = high.iloc[-LOOKBACK_SWING:-1]
-            resistance = float(resistance_window.max()) if not resistance_window.empty else pullback["peak_price"]
-
-            levels = calc_levels(df, pullback, resistance)
+            resistances = find_resistances(high, close)
+            levels = calc_levels(df, pullback, resistances)
             if levels is None:
                 continue
 
-            # --- Katman belirleme ---
-            tier = None
-            if trend["ok"] and confluence["count"] >= strong_conf_needed and levels["rr1"] >= MIN_RR:
-                tier = "STRONG"
-            elif confluence["count"] >= MIN_CONFLUENCE_WATCH and levels["rr1"] >= MIN_RR_WATCH:
-                tier = "WATCH"
-            else:
+            rs = relative_strength(close, xu100_close)
+            cp = float(close.iloc[-1])
+
+            stage = determine_stage(trend, pullback, confluence, rs, levels, cp)
+            if stage is None:
                 continue
 
-            score = (confluence["count"] / 4) * 60 + min(levels["rr1"], 4) * 10
-            score = round(min(100, score), 1)
+            score = compute_score(trend, pullback, confluence["checks"], rs, levels["rr1"])
 
             results.append({
-                "ticker": ticker, "close": float(close.iloc[-1]), "score": score,
+                "ticker": ticker, "close": cp, "score": score,
                 "confluence": confluence, "pullback": pullback, "levels": levels,
-                "trend": trend, "tier": tier
+                "trend": trend, "rs": rs, "stage": stage,
             })
 
         except Exception:
             continue
 
         if i % 50 == 0:
-            print(f"  ...{i} hisse analiz edildi")
+            log.info(f"  ...{i} hisse analiz edildi")
 
-    # Güçlü sinyaller önce, sonra izleme listesi; her ikisi de kendi içinde skora göre
-    tier_order = {"STRONG": 1, "WATCH": 0}
-    results.sort(key=lambda x: (tier_order[x["tier"]], x["score"]), reverse=True)
+    stage_order = {"TRIGGER": 3, "BREAKOUT": 2, "SETUP": 1, "WATCH": 0}
+    results.sort(key=lambda x: (stage_order[x["stage"]], x["score"]), reverse=True)
 
-    sent_strong, sent_watch = 0, 0
+    sent_counts = {"TRIGGER": 0, "SETUP": 0, "WATCH": 0, "BREAKOUT": 0}
+    max_counts = {"TRIGGER": MAX_TRIGGER_ALERTS, "SETUP": MAX_SETUP_ALERTS,
+                  "WATCH": MAX_WATCH_ALERTS, "BREAKOUT": MAX_BREAKOUT_ALERTS}
+
     for item in results:
-        tier = item["tier"]
-        if tier == "STRONG" and sent_strong >= MAX_ALERTS:
-            continue
-        if tier == "WATCH" and sent_watch >= MAX_WATCH_ALERTS:
+        stage = item["stage"]
+        if sent_counts[stage] >= max_counts[stage]:
             continue
 
-        prev = get_previous_state(item["ticker"])
-        should_notify = prev is None or item["score"] >= (prev["score"] or 0) + 5 or item["confluence"]["rvol"] >= (prev["rvol"] or 1) + 0.3
+        prev = get_previous_state(state, item["ticker"])
+        # Durum makinesi mantığı: sadece AŞAMA DEĞİŞTİĞİNDE bildirim gönder.
+        # Aynı aşamada kalırken skor belirgin iyileşirse yine de haber ver.
+        stage_changed = prev is None or prev.get("stage") != stage
+        score_improved = prev is not None and item["score"] >= (prev.get("score") or 0) + 8
+        should_notify = stage_changed or score_improved
 
         if should_notify:
-            c, l, tr, pb = item["confluence"], item["levels"], item["trend"], item["pullback"]
-            checks_text = ", ".join([k for k, v in c["checks"].items() if v]) or "yok"
-
-            if tier == "STRONG":
-                header = "⚡ *TREND İÇİ TOPARLANMA SİNYALİ* (Güçlü)"
-                footer_note = "_Bu bir yatırım tavsiyesi değildir, teknik bir analiz özetidir._"
-            else:
-                header = "🟡 *İZLEME LİSTESİ* (Değerlendirilebilir — kesin sinyal değil)"
-                footer_note = ("_Bu sinyal daha gevşek kriterlerle üretildi, güven seviyesi düşüktür. "
-                                "Ek teyit almadan aksiyon almayın. Yatırım tavsiyesi değildir._")
-
-            msg = (
-                f"{header}\n\n"
-                f"📌 *Hisse:* `{item['ticker']}`\n"
-                f"🎯 *Skor:* {item['score']:.1f}/100 | Confluence: {c['count']}/4 ({checks_text})\n"
-                f"📐 *Trend durumu:* {'Tam onaylı ✅' if tr['ok'] else 'Kısmi (sadece SMA200 üzeri) ⚠️'}\n\n"
-                f"💰 *Fiyat:* {item['close']:.2f}\n"
-                f"📉 *Düzeltme derinliği:* %{pb['drawdown_pct']:.1f} (tepe {pb['peak_price']:.2f} → dip {pb['trough_price']:.2f})\n"
-                f"📈 *Dipten toparlanma:* %{pb['recovery_from_low_pct']:.1f}\n"
-                f"🔀 *RSI:* {c['rsi']:.1f}{' (bullish divergence ✓)' if c['divergence'] else ''}\n"
-                f"🌊 *MACD histogram:* {'dönüş ↑' if c['checks']['macd'] else 'nötr'}\n"
-                f"💵 *CMF:* {c['cmf']:+.2f} | *RVOL:* {c['rvol']:.2f}x\n\n"
-                f"🎯 *Giriş:* {l['entry']:.2f}\n"
-                f"🛑 *Stop:* {l['stop']:.2f} (-%{l['risk_pct']:.1f})\n"
-                f"🎯 *Hedef 1:* {l['target1']:.2f} (R/R {l['rr1']:.1f})\n"
-                f"🎯 *Hedef 2:* {l['target2']:.2f} (R/R {l['rr2']:.1f})\n\n"
-                f"{footer_note}"
-            )
+            msg = build_message(item["ticker"], item)
             send_telegram(msg)
-            if tier == "STRONG":
-                sent_strong += 1
-            else:
-                sent_watch += 1
+            sent_counts[stage] += 1
             time.sleep(0.5)
 
-        update_state(item["ticker"], item["tier"], item["score"], item["confluence"]["rvol"], item["close"])
+        update_state(state, item["ticker"], stage, item["score"], item["confluence"]["rvol"], item["close"])
 
-    print("\n============================================")
-    print("✅ TARAMA TAMAMLANDI")
-    print(f"📊 Eşleşen aday: {len(results)} | 📨 Güçlü gönderilen: {sent_strong} | 📨 İzleme gönderilen: {sent_watch}")
-    print("============================================")
+    save_state(state)
+
+    log.info("============================================")
+    log.info("✅ TARAMA TAMAMLANDI")
+    log.info(f"📊 Eşleşen aday: {len(results)} | Gönderilen: {sent_counts}")
+    log.info("============================================")
 
     if results:
-        print("\n🏆 EN GÜÇLÜ ADAYLAR:\n")
+        log.info("🏆 EN GÜÇLÜ ADAYLAR:")
         for item in results[:15]:
-            print(f"{item['ticker']:12} | {item['tier']:6} | Skor {item['score']:5.1f} | Confluence {item['confluence']['count']}/4 | "
-                  f"R/R {item['levels']['rr1']:.1f} | Düzeltme %{item['pullback']['drawdown_pct']:.1f}")
+            log.info(f"{item['ticker']:12} | {item['stage']:8} | Skor {item['score']:5.1f} | "
+                     f"Confluence {item['confluence']['count']}/4 | R/R {item['levels']['rr1']:.1f}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        log.exception("Tarama beklenmedik şekilde çöktü")
+        send_telegram(f"🔴 *BOT ÇÖKTÜ*\n\n`{str(e)[:300]}`\n\nGitHub Actions loglarını kontrol edin.")
+        raise
