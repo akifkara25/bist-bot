@@ -3,8 +3,10 @@ name: BIST Tarama
 on:
   schedule:
     # Cron UTC'dir. Türkiye UTC+3'te sabit (DST yok).
-    # 06:45 UTC = 09:45 TRT -> Açılış öncesi özet (önceki kapanışa göre)
-    - cron: "45 6 * * 1-5"
+    # 08:05 UTC = 11:05 TRT -> Açılıştan (10:00) ~1 saat sonra
+    - cron: "5 8 * * 1-5"
+    # 14:05 UTC = 17:05 TRT -> Kapanışa ~1 saat kala (piyasa hâlâ açık)
+    - cron: "5 14 * * 1-5"
     # 15:30 UTC = 18:30 TRT -> Ana tarama (kapanış sonrası, günlük mum kapanmış)
     - cron: "30 15 * * 1-5"
   workflow_dispatch: {}   # Manuel tetikleme için
