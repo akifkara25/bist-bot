@@ -336,6 +336,82 @@ def calc_atr(df, period=14):
     return tr.rolling(period).mean()
 
 
+ZIGZAG_PERIOD = 15  # Gönderdiğin Pine Script'teki "prd" ile birebir aynı, varsayılan değeri de aynı
+
+
+def compute_zigzag(df, period=ZIGZAG_PERIOD):
+    """
+    Gönderdiğin "ZigZag with Fibonacci Levels" (LonesomeTheBlue) Pine Script'inin
+    BİREBİR AYNI mantığı: ATR değil, sabit bir gün penceresi (period) kullanır.
+
+    Her gün için: "bugünün High'ı, geriye dönük son `period` günün en yükseği mi?"
+    ve "bugünün Low'u, geriye dönük son `period` günün en düşüğü mü?" diye bakılır
+    (Pine'daki highestbars/lowestbars==0 kontrolüyle birebir aynı).
+
+    Yön (dir) değiştiğinde YENİ bir pivot onaylanır (kalıcı, bir daha değişmez).
+    Yön değişmediği sürece, mevcut (henüz "canlı"/onaylanmamış) pivot daha
+    ekstrem bir değer bulundukça güncellenir — tıpkı Pine'daki add_to_zigzag /
+    update_zigzag çiftinin yaptığı gibi.
+
+    Döner: (swing_highs, swing_lows) — SADECE ONAYLANMIŞ pivotlar (son, hâlâ
+    "canlı" olan uç nokta dahil değildir — Pine'daki zigzag[0] karşılığı).
+    """
+    high, low = df["High"], df["Low"]
+    n = len(df)
+    if n < period + 5:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+
+    roll_high = high.rolling(period, min_periods=period).max()
+    roll_low = low.rolling(period, min_periods=period).min()
+
+    # stack: en yeni pivot en başta (Pine'daki zigzag dizisiyle aynı sırada).
+    # Her eleman: {"price":..., "idx":..., "type": "H"/"L"}
+    stack = []
+    dir_ = 0
+
+    for i in range(period - 1, n):
+        idx = df.index[i]
+        h, l = float(high.iloc[i]), float(low.iloc[i])
+        rh, rl = roll_high.iloc[i], roll_low.iloc[i]
+        if pd.isna(rh) or pd.isna(rl):
+            continue
+
+        ph = h if h >= rh else None   # bugün, son `period` günün en yükseği mi
+        pl = l if l <= rl else None   # bugün, son `period` günün en düşüğü mü
+
+        new_dir = dir_
+        if ph is not None and pl is None:
+            new_dir = 1
+        elif pl is not None and ph is None:
+            new_dir = -1
+        # ikisi de aynı anda True/None ise yön DEĞİŞTİRİLMEZ (Pine'daki gibi)
+
+        if new_dir == 0:
+            continue  # henüz hiç yön belirlenmedi, atla
+
+        dirchanged = (new_dir != dir_) and dir_ != 0
+        dir_ = new_dir
+        value = h if dir_ == 1 else l
+        ptype = "H" if dir_ == 1 else "L"
+
+        if len(stack) == 0 or dirchanged:
+            stack.insert(0, {"price": value, "idx": idx, "type": ptype})
+            if len(stack) > 5:
+                stack.pop()
+        else:
+            current = stack[0]
+            if (dir_ == 1 and value > current["price"]) or (dir_ == -1 and value < current["price"]):
+                current["price"] = value
+                current["idx"] = idx
+
+    # stack[0] hâlâ "canlı" (onaylanmamış) -- dışarıda bırakıyoruz, geri kalanı onaylı.
+    confirmed = stack[1:]
+
+    swing_highs = pd.Series({p["idx"]: p["price"] for p in confirmed if p["type"] == "H"}, dtype=float)
+    swing_lows = pd.Series({p["idx"]: p["price"] for p in confirmed if p["type"] == "L"}, dtype=float)
+    return swing_highs.sort_index(), swing_lows.sort_index()
+
+
 def calc_cmf(df, period=20):
     high, low, close, volume = df["High"], df["Low"], df["Close"], df["Volume"]
     mfm = ((close - low) - (high - close)) / (high - low).replace(0, np.nan)
@@ -350,6 +426,51 @@ def calc_bbw(close, period=20, num_std=2):
     upper = sma + num_std * std
     lower = sma - num_std * std
     return (upper - lower) / sma
+
+
+def calc_fibonacci_levels(peak_price, trough_price):
+    """
+    SADECE BİLGİ AMAÇLI — Giriş/Stop/Hedef kararına hiçbir etkisi yok.
+    detect_pullback()'in ZATEN bulduğu aynı tepe/dip noktalarından
+    hesaplanır; yeni bir tespit algoritması eklenmiyor, sadece aritmetik.
+
+    Retracement (geri çekilme, dipten tepeye doğru %'ler) ve extension
+    (uzatma, tepenin ötesi ek referans hedefler) seviyeleri döner.
+    """
+    diff = peak_price - trough_price
+    if diff <= 0:
+        return None
+
+    return {
+        "retr_382": trough_price + diff * 0.382,
+        "retr_500": trough_price + diff * 0.5,
+        "retr_618": trough_price + diff * 0.618,
+        "ext_1272": trough_price + diff * 1.272,
+        "ext_1618": trough_price + diff * 1.618,
+    }
+
+
+def get_confirmed_fib_leg(peak_idx, peak_price, swing_lows):
+    """
+    Gönderdiğin Pine Script'in mantığı: Fibonacci, HENÜZ ONAYLANMAMIŞ
+    (hâlâ hareket edebilecek) bir uç noktadan değil, TAMAMEN KESİNLEŞMİŞ
+    bir bacaktan çizilir (script'te zigzag[4]->zigzag[2], yani en son değil,
+    ondan önceki tamamlanmış bacak).
+
+    Bizim durumumuzda: pullback'in TEPESİ zaten kesinleşmiş bir ZigZag
+    pivotu (detect_pullback bunu zaten öyle seçiyor). Ama DİP, henüz ZigZag
+    tarafından onaylanmamış olabilir (düşüş/toparlanma hâlâ "canlı" olabilir,
+    ki botun mantığı gereği genelde tam da bu durumdayken sinyal üretiyoruz).
+
+    Bu yüzden: tepeden SONRA ZigZag'ın gerçekten onayladığı bir dip varsa
+    onu kullanırız. Yoksa Fibonacci'yi HİÇ göstermeyiz — kararsız/değişebilir
+    bir sayı göstermektense hiç göstermemek, script'in felsefesine daha sadık.
+    """
+    confirmed_after_peak = swing_lows[swing_lows.index > peak_idx]
+    if len(confirmed_after_peak) == 0:
+        return None
+    trough_price = float(confirmed_after_peak.iloc[-1])
+    return calc_fibonacci_levels(peak_price, trough_price)
 
 # ============================================================
 # SWING (GERÇEK TEPE/DİP) TESPİTİ
@@ -396,19 +517,24 @@ def weekly_trend_ok(df):
         return True
 
 
-def hh_hl_structure(high, low, lookback=LOOKBACK_STRUCTURE, order=SWING_ORDER):
-    h = high.tail(lookback)
-    l = low.tail(lookback)
-    sh_idx = find_swings(h, order, "max")
-    sl_idx = find_swings(l, order, "min")
-    sh_vals = h.loc[sh_idx]
-    sl_vals = l.loc[sl_idx]
+def hh_hl_structure(df, swing_highs, swing_lows, lookback=LOOKBACK_STRUCTURE):
+    """
+    ZigZag ile ÖNCEDEN (bir kez) hesaplanmış swing_highs/swing_lows'u alır,
+    sadece son `lookback` gün içine düşenleri filtreler. Böylece tüm
+    fonksiyonlar AYNI pivot noktalarını kullanır — tutarlılık garantisi.
+    """
+    if len(df) < lookback:
+        cutoff = df.index[0]
+    else:
+        cutoff = df.index[-lookback]
+    sh_vals = swing_highs[swing_highs.index >= cutoff]
+    sl_vals = swing_lows[swing_lows.index >= cutoff]
     hh = bool(len(sh_vals) >= 2 and sh_vals.iloc[-1] > sh_vals.iloc[-2])
     hl = bool(len(sl_vals) >= 2 and sl_vals.iloc[-1] > sl_vals.iloc[-2])
     return {"hh": hh, "hl": hl, "swing_highs": sh_vals, "swing_lows": sl_vals}
 
 
-def trend_filter(df):
+def trend_filter(df, swing_highs, swing_lows):
     close, high, low = df["Close"], df["High"], df["Low"]
     if len(close) < 210:
         return {"ok": False, "reason": "yetersiz veri"}
@@ -424,7 +550,7 @@ def trend_filter(df):
     sma50_rising = float(sma50.iloc[-1]) > float(sma50.iloc[-10])
     golden = float(sma50.iloc[-1]) > float(sma200.iloc[-1])
 
-    structure = hh_hl_structure(high, low)
+    structure = hh_hl_structure(df, swing_highs, swing_lows)
     weekly_ok = weekly_trend_ok(df)
 
     ok = above200 and sma50_rising and golden and (structure["hl"] or above50) and weekly_ok
@@ -439,7 +565,8 @@ def trend_filter(df):
 # 2) DÜZELTME (PULLBACK)
 # ============================================================
 
-def detect_pullback(high, low, close, lookback=LOOKBACK_SWING, order=SWING_ORDER, context_buffer=30):
+def detect_pullback(df, swing_highs, swing_lows, lookback=LOOKBACK_SWING, order=SWING_ORDER, context_buffer=30):
+    high, low, close = df["High"], df["Low"], df["Close"]
     window = lookback + context_buffer
     if len(close) < window:
         return {"ok": False}
@@ -447,18 +574,21 @@ def detect_pullback(high, low, close, lookback=LOOKBACK_SWING, order=SWING_ORDER
     h = high.tail(window)
     l = low.tail(window)
 
-    sh_idx = find_swings(h, order, "max")
-    if len(sh_idx) == 0:
+    # ZigZag ile önceden bulunmuş tepe noktalarından, bu pencereye düşenler
+    window_start = h.index[0]
+    candidates_all = swing_highs[swing_highs.index >= window_start]
+    if len(candidates_all) == 0:
         return {"ok": False}
 
     cutoff = h.index[-lookback]
-    recent_peaks = [idx for idx in sh_idx if idx >= cutoff]
-    candidates = recent_peaks if recent_peaks else list(sh_idx)
-    peak_idx = h.loc[candidates].idxmax()
-    peak_price = float(h.loc[peak_idx])
+    recent_peaks = candidates_all[candidates_all.index >= cutoff]
+    candidates = recent_peaks if len(recent_peaks) > 0 else candidates_all
+    peak_idx = candidates.idxmax()
+    peak_price = float(candidates.loc[peak_idx])
     if peak_price <= 0:
         return {"ok": False}
 
+    # Dip: ZigZag'a gerek yok, tepeden bugüne kadarki ham minimum (daha duyarlı ve basit)
     after_peak_low = l.loc[peak_idx:]
     if after_peak_low.empty:
         return {"ok": False}
@@ -470,12 +600,11 @@ def detect_pullback(high, low, close, lookback=LOOKBACK_SWING, order=SWING_ORDER
     recovery_from_low_pct = (cp - trough_price) / trough_price * 100 if trough_price > 0 else 0
     healthy_depth = PULLBACK_MIN_PCT <= drawdown_pct <= PULLBACK_MAX_PCT
 
-    after_trough_low = l.loc[trough_idx:]
-    sl_after = find_swings(after_trough_low, order, "min")
+    # Dipten sonra higher-low oluşmuş mu — YİNE aynı ZigZag dip pivotlarından bakıyoruz
+    lows_after_trough = swing_lows[swing_lows.index >= trough_idx]
     higher_low_after_trough = False
-    if len(sl_after) >= 2:
-        vals = after_trough_low.loc[sl_after]
-        higher_low_after_trough = bool(vals.iloc[-1] > vals.iloc[-2])
+    if len(lows_after_trough) >= 2:
+        higher_low_after_trough = bool(lows_after_trough.iloc[-1] > lows_after_trough.iloc[-2])
 
     near_recent_high = cp >= float(h.tail(5).max()) * 0.98
     solid_bounce = recovery_from_low_pct >= 3.0
@@ -570,7 +699,7 @@ def relative_strength(close, xu100_close, lookback=RS_LOOKBACK):
 # 6) CONFLUENCE (4 ana kategori + sıkışma bonusu)
 # ============================================================
 
-def evaluate_confluence(df, pullback):
+def evaluate_confluence(df, pullback, swing_highs, swing_lows):
     close, high, low, volume = df["Close"], df["High"], df["Low"], df["Volume"]
     peak_idx, trough_idx = pullback["peak_idx"], pullback["trough_idx"]
 
@@ -594,7 +723,7 @@ def evaluate_confluence(df, pullback):
 
     checks["macd"] = macd_confirm(hist, macd_line, signal_line)
 
-    structure = hh_hl_structure(high, low)
+    structure = hh_hl_structure(df, swing_highs, swing_lows)
     obv5 = obv.tail(5).mean()
     obv20 = obv.iloc[-21:-1].mean() if len(obv) >= 21 else obv5
     obv_confirms = obv5 > obv20
@@ -621,10 +750,12 @@ def evaluate_confluence(df, pullback):
 # 7) DİRENÇ SEVİYELERİ
 # ============================================================
 
-def find_resistances(high, close, lookback=LOOKBACK_STRUCTURE, order=SWING_ORDER):
-    h = high.tail(lookback)
-    sh_idx = find_swings(h, order, "max")
-    sh_vals = h.loc[sh_idx].sort_values()
+def find_resistances(df, swing_highs, close, lookback=LOOKBACK_STRUCTURE):
+    if len(df) < lookback:
+        cutoff = df.index[0]
+    else:
+        cutoff = df.index[-lookback]
+    sh_vals = swing_highs[swing_highs.index >= cutoff].sort_values()
     cp = float(close.iloc[-1])
     above = sh_vals[sh_vals > cp * 1.005]
     nearest = float(above.iloc[0]) if len(above) >= 1 else None
@@ -811,11 +942,21 @@ def build_message(ticker, item):
     info = STAGE_INFO[stage]
     c, l, tr, pb, rs = item["confluence"], item["levels"], item["trend"], item["pullback"], item["rs"]
     nearest_res, second_res = item["resistances"]
+    fib = item.get("fib")
 
     checks_text = ", ".join([k for k, v in c["checks"].items() if v and k != "sikisma"]) or "yok"
     squeeze_text = " + sıkışma ✓" if c["checks"]["sikisma"] else ""
     rs_text = f"{rs['rs_change_pct']:+.1f}%" if rs.get("available") else "veri yetersiz"
     res_text = f"{nearest_res:.2f}" if nearest_res else "tespit edilemedi (veri penceresi dışında)"
+
+    if fib:
+        fib_line = (
+            f"📐 *FİBONACCİ (kesinleşmiş bacaktan, ek referans)*\n"
+            f"%38.2: {fib['retr_382']:.2f}  |  %50: {fib['retr_500']:.2f}  |  %61.8: {fib['retr_618']:.2f}\n"
+            f"%127.2 uzatma: {fib['ext_1272']:.2f}  |  %161.8 uzatma: {fib['ext_1618']:.2f}\n\n"
+        )
+    else:
+        fib_line = ""
 
     msg = (
         f"{info['baslik']}\n"
@@ -850,6 +991,7 @@ def build_message(ticker, item):
         f"🎯 Hedef 1: {l['target1']:.2f}  (R/R {l['rr1']:.1f}){' [gerçek direnç]' if l['target1_is_real_resistance'] else ' [hesaplanmış]'}\n"
         f"🎯 Hedef 2: {l['target2']:.2f}  (R/R {l['rr2']:.1f})\n\n"
 
+        f"{fib_line}"
         f"⚠️ _Yatırım tavsiyesi değildir, teknik analiz özetidir. Skor ağırlıkları henüz backtest edilmedi._"
     )
     return msg
@@ -994,16 +1136,20 @@ def main():
             if turnover.tail(5).mean() < MIN_TURNOVER_TL:
                 continue
 
-            trend = trend_filter(df)
+            # ZigZag SADECE BİR KEZ hesaplanır; trend/pullback/confluence/direnç
+            # HEPSİ aynı pivot noktalarını kullanır -- tutarlılık garantisi.
+            swing_highs, swing_lows = compute_zigzag(df)
+
+            trend = trend_filter(df, swing_highs, swing_lows)
             if not trend.get("above200"):
                 continue
 
-            pullback = detect_pullback(high, low, close)
+            pullback = detect_pullback(df, swing_highs, swing_lows)
             if not pullback["ok"]:
                 continue
 
-            confluence = evaluate_confluence(df, pullback)
-            resistances = find_resistances(high, close)
+            confluence = evaluate_confluence(df, pullback, swing_highs, swing_lows)
+            resistances = find_resistances(df, swing_highs, close)
             levels = calc_levels(df, pullback, resistances)
             if levels is None:
                 continue
@@ -1017,11 +1163,13 @@ def main():
                 continue
 
             score = compute_score(trend, pullback, confluence, rs, levels["rr1"])
+            fib = get_confirmed_fib_leg(pullback["peak_idx"], pullback["peak_price"], swing_lows)
 
             results.append({
                 "ticker": ticker, "close": cp, "score": score,
                 "confluence": confluence, "pullback": pullback, "levels": levels,
                 "trend": trend, "rs": rs, "stage": stage, "resistances": resistances,
+                "fib": fib,
             })
 
         except Exception:
