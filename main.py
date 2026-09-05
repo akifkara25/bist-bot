@@ -336,7 +336,14 @@ def calc_atr(df, period=14):
     return tr.rolling(period).mean()
 
 
-ZIGZAG_PERIOD = 15  # Gönderdiğin Pine Script'teki "prd" ile birebir aynı, varsayılan değeri de aynı
+# NEDEN 15: Referans Pine Script'in varsayılanıyla aynı. Ayrıca test ettik:
+# botun PULLBACK_MIN_PCT=4 hedefi (en sığ %4'lik düzeltmeleri bile yakalama)
+# ile 15 uyumlu, ama period=20/30 kullanıldığında sığ (~%5) bir düzeltme
+# TAMAMEN KAÇIRILIYOR (test: gerçek ~%5 düzeltmeli sentetik veride period=15
+# doğru yakaladı, period=20 ve 30 hiç pivot bulamadı). Yani 15'in üzerine
+# çıkmak, botun kendi amacıyla doğrudan çelişir — bu bir tercih değil, ölçülmüş
+# bir uyumluluk sınırı.
+ZIGZAG_PERIOD = 15
 
 
 def compute_zigzag(df, period=ZIGZAG_PERIOD):
@@ -926,8 +933,8 @@ STAGE_INFO = {
     },
     "MAIN_BREAK": {
         "baslik": "🟢 ANA DİRENÇ KIRILDI",
-        "ozet": "Fiyat, geçmişteki gerçek direnci geçti.",
-        "detay": "Bu, sistemin en yüksek güvenilirlikli aşaması: fiyat, son 120 günün gerçek direncini kırdı.",
+        "ozet": "Fiyat, düzeltmeden önceki kendi zirvesini yeniden geçti.",
+        "detay": "Bu, sistemin en yüksek güvenilirlikli aşaması: fiyat, düzeltme başlamadan önceki tepe seviyesini yeniden aştı — tam bir tur tamamlandı.",
     },
     "EXTENDED": {
         "baslik": "🔴 AŞIRI UZAMIŞ",
@@ -1156,9 +1163,13 @@ def main():
 
             rs = relative_strength(close, xu100_close)
             cp = float(close.iloc[-1])
-            nearest_res, _ = resistances
 
-            stage = determine_stage(trend, pullback, confluence, levels, cp, nearest_res)
+            # ÖNEMLİ DÜZELTME: "Ana Kırılım" kontrolü, find_resistances'ın bulduğu
+            # (yapı gereği HER ZAMAN cp'nin üzerinde olan) bir seviyeye göre DEĞİL,
+            # pullback'in KENDİ tepesine göre yapılıyor. Aksi halde "cp >= direnç"
+            # koşulu, direnç zaten "cp'nin üzerinde" seçildiği için MATEMATİKSEL
+            # OLARAK ASLA doğru olamazdı (bulundu ve test edildi).
+            stage = determine_stage(trend, pullback, confluence, levels, cp, pullback["peak_price"])
             if stage is None:
                 continue
 
