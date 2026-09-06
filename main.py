@@ -624,7 +624,6 @@ def detect_pullback(df, swing_highs, swing_lows, lookback=LOOKBACK_SWING, order=
         "trough_price": trough_price, "trough_idx": trough_idx,
         "drawdown_pct": drawdown_pct, "recovery_from_low_pct": recovery_from_low_pct,
         "higher_low_after_trough": higher_low_after_trough,
-        "near_recent_high": near_recent_high,
     }
 
 # ============================================================
@@ -749,8 +748,7 @@ def evaluate_confluence(df, pullback, swing_highs, swing_lows):
     return {
         "checks": checks, "count": confluence_count, "rvol": rvol,
         "cmf": float(cmf.iloc[-1]), "divergence": divergence, "rsi": rsi_now,
-        "decline_shrank": decline_shrank, "recovery_rising": recovery_rising,
-        "squeeze": squeeze, "obv_confirms": obv_confirms,
+        "decline_shrank": decline_shrank, "squeeze": squeeze,
     }
 
 # ============================================================
