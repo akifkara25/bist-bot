@@ -6,7 +6,7 @@ import requests
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from scipy.signal import argrelextrema
 
 # ============================================================
@@ -71,7 +71,7 @@ def market_session_label():
     çekilen "bugünün mumu" henüz tamamlanmamıştır (hacim özellikle düşük
     görünür, RVOL yanıltıcı olabilir).
     """
-    trt_now = datetime.utcnow() + timedelta(hours=3)
+    trt_now = datetime.now(timezone.utc) + timedelta(hours=3)
     minutes = trt_now.hour * 60 + trt_now.minute
 
     if minutes < 10 * 60:
@@ -247,6 +247,11 @@ def data_quality_check(df):
     last_date = df.index[-1]
     if hasattr(last_date, "to_pydatetime"):
         last_date = last_date.to_pydatetime()
+    # NOT: last_date tz-aware gelirse (.replace(tzinfo=None)) saat dilimi
+    # DÖNÜŞÜMÜ yapmadan direkt siliyoruz -- bu birkaç saatlik bir yaklaşıklık
+    # yaratabilir. Gerçek yfinance çıktısıyla test edilemediği için (bu ortamda
+    # ağ erişimi yok) bilerek DOKUNULMADI: MAX_STALE_DAYS=5 günlük tampon payı,
+    # birkaç saatlik bu farkı zaten fazlasıyla yutuyor, pratik bir etkisi yok.
     if (datetime.now() - last_date.replace(tzinfo=None)) > timedelta(days=MAX_STALE_DAYS):
         return False, f"veri çok eski ({last_date.date()})"
     daily_change = df["Close"].pct_change().abs()
@@ -414,9 +419,26 @@ def compute_zigzag(df, period=ZIGZAG_PERIOD):
     # stack[0] hâlâ "canlı" (onaylanmamış) -- dışarıda bırakıyoruz, geri kalanı onaylı.
     confirmed = stack[1:]
 
-    swing_highs = pd.Series({p["idx"]: p["price"] for p in confirmed if p["type"] == "H"}, dtype=float)
-    swing_lows = pd.Series({p["idx"]: p["price"] for p in confirmed if p["type"] == "L"}, dtype=float)
-    return swing_highs.sort_index(), swing_lows.sort_index()
+    def _to_price_series(pivot_list):
+        """
+        KRİTİK DÜZELTME: pd.Series({}, dtype=float) -- yani hiç pivot
+        bulunamadığında -- pandas'ta boş bir Series üretir ama index'i
+        DatetimeIndex DEĞİL, sıradan (Range/object) bir index olur. Bu da
+        ileride ".index >= bir_tarih" gibi karşılaştırmalarda ("TypeError:
+        '>=' not supported between numpy.ndarray and Timestamp") ÇÖKMEYE
+        yol açıyordu -- özellikle çok güçlü, kesintisiz trendli hisselerde
+        (hiç düzeltme onaylanmadığında) gerçekleşiyordu. Şimdi boş durumda
+        bile index'i EXPLICIT olarak DatetimeIndex yapıyoruz.
+        """
+        if not pivot_list:
+            return pd.Series(dtype=float, index=pd.DatetimeIndex([]))
+        idx = pd.DatetimeIndex([p["idx"] for p in pivot_list])
+        vals = [p["price"] for p in pivot_list]
+        return pd.Series(vals, index=idx).sort_index()
+
+    swing_highs = _to_price_series([p for p in confirmed if p["type"] == "H"])
+    swing_lows = _to_price_series([p for p in confirmed if p["type"] == "L"])
+    return swing_highs, swing_lows
 
 
 def calc_cmf(df, period=20):
@@ -623,7 +645,6 @@ def detect_pullback(df, swing_highs, swing_lows, lookback=LOOKBACK_SWING, order=
         "peak_price": peak_price, "peak_idx": peak_idx,
         "trough_price": trough_price, "trough_idx": trough_idx,
         "drawdown_pct": drawdown_pct, "recovery_from_low_pct": recovery_from_low_pct,
-        "higher_low_after_trough": higher_low_after_trough,
     }
 
 # ============================================================
@@ -746,8 +767,7 @@ def evaluate_confluence(df, pullback, swing_highs, swing_lows):
     confluence_count = sum(v for k, v in checks.items() if k != "sikisma")
 
     return {
-        "checks": checks, "count": confluence_count, "rvol": rvol,
-        "cmf": float(cmf.iloc[-1]), "divergence": divergence, "rsi": rsi_now,
+        "checks": checks, "count": confluence_count, "rvol": rvol, "rsi": rsi_now,
         "decline_shrank": decline_shrank, "squeeze": squeeze,
     }
 
@@ -776,9 +796,6 @@ def calc_levels(df, pullback, resistances):
     atr = float(calc_atr(df).iloc[-1])
     trough = pullback["trough_price"]
 
-    entry_early_low = trough * 1.005
-    entry_early_high = trough * 1.05
-
     # Yerel (kısa vadeli) tetik: son 3 günün zirvesinin hafif üzeri.
     # DİKKAT: bu, hissenin GERÇEK yapısal direncinden (aşağıdaki nearest_res)
     # tamamen farklı ve genelde çok daha yakın bir seviyedir. Bunu "büyük
@@ -805,9 +822,8 @@ def calc_levels(df, pullback, resistances):
     rr2 = (target2 - entry_trigger) / risk
 
     return {
-        "entry_early_low": entry_early_low, "entry_early_high": entry_early_high,
         "entry_trigger": entry_trigger, "stop": stop,
-        "target1": target1, "target2": target2, "target1_is_real_resistance": nearest_res is not None,
+        "target1": target1, "target2": target2,
         "risk_pct": (risk / entry_trigger) * 100, "rr1": rr1, "rr2": rr2,
     }
 
@@ -912,92 +928,64 @@ def determine_stage(trend, pullback, confluence, levels, cp, structural_resistan
 # ============================================================
 
 STAGE_INFO = {
-    "WATCH": {
-        "baslik": "🔵 İZLEME LİSTESİ",
-        "ozet": "Erken aşama, düşük güven. Sadece radarına girsin.",
-        "detay": "Kriterlerin bir kısmı sağlanıyor ama trend/teyit tam değil. Aksiyon sinyali değildir.",
-    },
-    "SETUP": {
-        "baslik": "🟠 KURULUM HAZIR",
-        "ozet": "Trend ve teyitler güçlü, kırılım henüz yok.",
-        "detay": "Tüm kriterler olumlu ama fiyat henüz hiçbir seviyeyi kırmadı. Aşağıdaki seviyeleri takip et.",
-    },
-    "LOCAL_BREAK": {
-        "baslik": "🟡 ERKEN KIRILIM (Yerel)",
-        "ozet": "Kısa vadeli bant kırıldı — erken bir ipucu.",
-        "detay": ("Fiyat kendi kısa vadeli (3 günlük) bandını kırdı ve teyitler güçlü. "
-                   "Ancak hisse HÂLÂ gerçek (uzun vadeli) direncinden uzak olabilir — "
-                   "bu erken bir sinyal, ana kırılım değil. Temkinli değerlendir."),
-    },
-    "MAIN_BREAK": {
-        "baslik": "🟢 ANA DİRENÇ KIRILDI",
-        "ozet": "Fiyat, düzeltmeden önceki kendi zirvesini yeniden geçti.",
-        "detay": "Bu, sistemin en yüksek güvenilirlikli aşaması: fiyat, düzeltme başlamadan önceki tepe seviyesini yeniden aştı — tam bir tur tamamlandı.",
-    },
-    "EXTENDED": {
-        "baslik": "🔴 AŞIRI UZAMIŞ",
-        "ozet": "Kırılımdan bu yana fiyat belirgin uzaklaşmış.",
-        "detay": "Ana direnç kırıldıktan sonra fiyat hızla uzaklaşmış. Kovalama riski yüksek, dikkatli ol.",
-    },
+    "WATCH": {"baslik": "🔵 İZLEME LİSTESİ"},
+    "SETUP": {"baslik": "🟠 KURULUM HAZIR"},
+    "LOCAL_BREAK": {"baslik": "🟡 ERKEN KIRILIM (Yerel)"},
+    "MAIN_BREAK": {"baslik": "🟢 DÜZELTME TEPESİ AŞILDI"},
+    "EXTENDED": {"baslik": "🔴 AŞIRI UZAMIŞ"},
 }
 
 
 def build_message(ticker, item):
     stage = item["stage"]
     info = STAGE_INFO[stage]
-    c, l, tr, pb, rs = item["confluence"], item["levels"], item["trend"], item["pullback"], item["rs"]
-    nearest_res, second_res = item["resistances"]
+    c, l, pb, rs = item["confluence"], item["levels"], item["pullback"], item["rs"]
     fib = item.get("fib")
 
     checks_text = ", ".join([k for k, v in c["checks"].items() if v and k != "sikisma"]) or "yok"
-    squeeze_text = " + sıkışma ✓" if c["checks"]["sikisma"] else ""
-    rs_text = f"{rs['rs_change_pct']:+.1f}%" if rs.get("available") else "veri yetersiz"
-    res_text = f"{nearest_res:.2f}" if nearest_res else "tespit edilemedi (veri penceresi dışında)"
+    rs_text = f"{rs['rs_change_pct']:+.1f}%" if rs.get("available") else "n/a"
 
-    if fib:
-        fib_line = (
-            f"📐 *FİBONACCİ (kesinleşmiş bacaktan, ek referans)*\n"
-            f"%38.2: {fib['retr_382']:.2f}  |  %50: {fib['retr_500']:.2f}  |  %61.8: {fib['retr_618']:.2f}\n"
-            f"%127.2 uzatma: {fib['ext_1272']:.2f}  |  %161.8 uzatma: {fib['ext_1618']:.2f}\n\n"
-        )
+    fib_line = f"📐 Fib: %61.8→{fib['retr_618']:.2f} | %161.8→{fib['ext_1618']:.2f}\n" if fib else ""
+
+    # DÜZELTME: MAIN_BREAK/EXTENDED'de "Giriş" olarak entry_trigger (yerel,
+    # 3 günlük referans) gösterilirse, bu bazen güncel fiyatın ÜZERİNDE
+    # kalabiliyor -- "kırılım zaten oldu" mesajıyla çelişen bir görüntü
+    # yaratıyor (bkz. BIMAS örneği: Giriş 418.17 > güncel fiyat 415.75).
+    # Bu aşamalarda artık GÜNCEL FİYAT referans alınıyor (zaten kırılmış,
+    # buradan takip edilir), Stop/Hedef/R-R de buna göre TUTARLI şekilde
+    # yeniden hesaplanıyor. Sinyal kararı (determine_stage, MIN_RR eşiği)
+    # buna dokunmuyor, SADECE mesajdaki gösterim tutarlılığı düzeliyor.
+    if stage in ("MAIN_BREAK", "EXTENDED"):
+        display_entry = item["close"]
+        entry_label = "Güncel fiyattan (zaten kırılmış)"
     else:
-        fib_line = ""
+        display_entry = l["entry_trigger"]
+        entry_label = "Giriş"
+
+    display_risk = display_entry - l["stop"]
+    if display_risk > 0:
+        display_risk_pct = display_risk / display_entry * 100
+        display_rr1 = (l["target1"] - display_entry) / display_risk
+        display_rr2 = (l["target2"] - display_entry) / display_risk
+    else:
+        # Güvenlik: beklenmedik durumda (stop >= güncel fiyat) orijinal
+        # değerlere geri dön, çökme veya anlamsız sayı üretme.
+        display_entry, display_risk_pct = l["entry_trigger"], l["risk_pct"]
+        display_rr1, display_rr2 = l["rr1"], l["rr2"]
+        entry_label = "Giriş"
 
     msg = (
-        f"{info['baslik']}\n"
-        f"_{info['ozet']}_\n"
-        f"{market_session_label()}\n\n"
+        f"📌 *{ticker}*\n"
+        f"{info['baslik']} | Skor {item['score']:.1f}/100 | {c['count']}/4 ({checks_text})\n\n"
 
-        f"📌 *HİSSE*\n"
-        f"`{ticker}`  |  Güncel fiyat: *{item['close']:.2f} TL*\n\n"
+        f"💰 {item['close']:.2f} TL | Düzeltme %{pb['drawdown_pct']:.1f} ({pb['peak_price']:.2f}→{pb['trough_price']:.2f}) | Toparlanma %{pb['recovery_from_low_pct']:.1f}\n"
+        f"📊 RSI {c['rsi']:.1f} | MACD {'↑' if c['checks']['macd'] else '–'} | Hacim {'✓' if c['checks']['hacim'] else '–'} (RVOL {c['rvol']:.2f}x) | RS(20g) {rs_text}\n\n"
 
-        f"📊 *GENEL DURUM*\n"
-        f"Skor: *{item['score']:.1f}/100*\n"
-        f"Confluence (teyit): {c['count']}/4 → {checks_text}{squeeze_text}\n"
-        f"{info['detay']}\n\n"
+        f"🎯 {entry_label}: {display_entry:.2f} | Stop: {l['stop']:.2f} (-%{display_risk_pct:.1f})\n"
+        f"Hedef 1: {l['target1']:.2f} (R/R {display_rr1:.1f}) | Hedef 2: {l['target2']:.2f} (R/R {display_rr2:.1f})\n"
+        f"{fib_line}\n"
 
-        f"📈 *TEKNİK GÖRÜNÜM*\n"
-        f"• Trend: {'Tam onaylı ✅' if tr['ok'] else 'Kısmi ⚠️'} (Haftalık: {'✅' if tr['weekly_ok'] else '⚠️'})\n"
-        f"• RSI: {c['rsi']:.1f}{' — bullish divergence ✓' if c['divergence'] else ''}\n"
-        f"• MACD: {'Dönüş teyitli ↑' if c['checks']['macd'] else 'Henüz teyit yok'}\n"
-        f"• Hacim/Para girişi: {'Olumlu ✓' if c['checks']['hacim'] else ('Kısmen olumlu' if c['decline_shrank'] else 'Zayıf')} (CMF: {c['cmf']:+.2f}, RVOL: {c['rvol']:.2f}x)\n"
-        f"• BIST'e göre görece güç (20G): {rs_text}\n\n"
-
-        f"🪜 *DÜZELTME BİLGİSİ*\n"
-        f"Tepe: {pb['peak_price']:.2f} → Dip: {pb['trough_price']:.2f}  (düzeltme: %{pb['drawdown_pct']:.1f})\n"
-        f"Dipten toparlanma: %{pb['recovery_from_low_pct']:.1f}"
-        f"{' | Higher-low ✓' if pb['higher_low_after_trough'] else ''}\n\n"
-
-        f"🎯 *SEVİYELER*\n"
-        f"🟢 Erken giriş bölgesi (agresif, teyitsiz): {l['entry_early_low']:.2f} - {l['entry_early_high']:.2f}\n"
-        f"🟡 Yerel kırılım seviyesi: {l['entry_trigger']:.2f}\n"
-        f"🟢 Gerçek yapısal direnç: {res_text}\n"
-        f"🛑 Stop: {l['stop']:.2f}  (-%{l['risk_pct']:.1f})\n"
-        f"🎯 Hedef 1: {l['target1']:.2f}  (R/R {l['rr1']:.1f}){' [gerçek direnç]' if l['target1_is_real_resistance'] else ' [hesaplanmış]'}\n"
-        f"🎯 Hedef 2: {l['target2']:.2f}  (R/R {l['rr2']:.1f})\n\n"
-
-        f"{fib_line}"
-        f"⚠️ _Yatırım tavsiyesi değildir, teknik analiz özetidir. Skor ağırlıkları henüz backtest edilmedi._"
+        f"⚠️ _Yatırım tavsiyesi değildir._"
     )
     return msg
 
@@ -1041,16 +1029,42 @@ def build_stop_hit_message(ticker, position, current_price):
     )
 
 
+HISTORY_KEY = "__history__"   # state.json içinde ayrı, ticker olmayan özel bir anahtar
+PERF_LAST_SENT_KEY = "__perf_last_sent__"  # performans özetinin en son ne zaman gönderildiği
+PERF_SUMMARY_INTERVAL_DAYS = 7  # performans özeti kaç günde bir gönderilsin
+MAX_HISTORY_ENTRIES = 300     # state.json'un sınırsız büyümesini önlemek için
+
+
+def add_to_history(state, ticker, outcome, position, exit_price):
+    """Kapanan bir sinyali (hedef/stop) kalıcı geçmişe ekler. En eski kayıtlar,
+    MAX_HISTORY_ENTRIES aşılırsa budanır (state.json şişmesin diye)."""
+    entry = position["entry"]
+    pct_change = (exit_price - entry) / entry * 100 if entry > 0 else 0.0
+    record = {
+        "ticker": ticker, "outcome": outcome, "entry": entry, "exit_price": exit_price,
+        "pct_change": round(pct_change, 2), "opened_date": position.get("opened_date"),
+        "closed_date": datetime.now().strftime("%Y-%m-%d"),
+    }
+    history = state.get(HISTORY_KEY, [])
+    history.append(record)
+    if len(history) > MAX_HISTORY_ENTRIES:
+        history = history[-MAX_HISTORY_ENTRIES:]
+    state[HISTORY_KEY] = history
+
+
 def check_open_positions(state, all_data):
     """
     Daha önce LOCAL_BREAK/MAIN_BREAK/EXTENDED ile açılmış (ve henüz
     kapanmamış) takipteki her hisse için, bu turun güncel kapanış
     fiyatına bakar. Hedefe ulaşmış ya da stop'a çarpmışsa özel bir
-    bildirim gönderir ve takibi kapatır. İkisi de olmamışsa hiçbir şey
+    bildirim gönderir, takibi kapatır VE kalıcı geçmişe (performans
+    istatistikleri için) kaydeder. İkisi de olmamışsa hiçbir şey
     göndermez, sessizce açık kalır.
     """
     closed = 0
     for ticker, info in list(state.items()):
+        if ticker == HISTORY_KEY or ticker == PERF_LAST_SENT_KEY:
+            continue
         position = info.get("position")
         if not position:
             continue
@@ -1064,11 +1078,13 @@ def check_open_positions(state, all_data):
 
         if current_price >= position["target1"]:
             send_telegram(build_target_hit_message(ticker, position, current_price))
+            add_to_history(state, ticker, "target", position, current_price)
             state[ticker]["position"] = None
             closed += 1
             time.sleep(0.5)
         elif current_price <= position["stop"]:
             send_telegram(build_stop_hit_message(ticker, position, current_price))
+            add_to_history(state, ticker, "stop", position, current_price)
             state[ticker]["position"] = None
             closed += 1
             time.sleep(0.5)
@@ -1079,20 +1095,65 @@ def check_open_positions(state, all_data):
 # GÜNLÜK ÖZET (v4 — yeni)
 # ============================================================
 
-def build_summary_message(stage_counts, total_scanned, total_universe, open_positions_count, regime_ok):
-    regime_text = "Güçlü ✅ (XU100 > 50G ort.)" if regime_ok else "Zayıf ⚠️ (XU100 < 50G ort.)"
+def build_summary_message(stage_counts, total_scanned, total_universe, open_positions_count, regime_ok, top3):
+    regime_text = "Güçlü ✅" if regime_ok else "Zayıf ⚠️"
+    top3_text = ", ".join(f"{t} ({s:.1f})" for t, s in top3) if top3 else "yok"
     return (
         f"📊 *TARAMA ÖZETİ*\n"
         f"{market_session_label()}\n"
-        f"🌍 Genel piyasa: {regime_text}\n\n"
-        f"🔍 Taranan: {total_scanned}/{total_universe} hisse\n\n"
-        f"🟢 Ana Kırılım: {stage_counts.get('MAIN_BREAK', 0)}\n"
-        f"🟡 Yerel Kırılım: {stage_counts.get('LOCAL_BREAK', 0)}\n"
-        f"🔴 Aşırı Uzamış: {stage_counts.get('EXTENDED', 0)}\n"
-        f"🟠 Kurulum Hazır: {stage_counts.get('SETUP', 0)}\n"
-        f"🔵 İzleme: {stage_counts.get('WATCH', 0)}\n\n"
-        f"📌 Şu an takip edilen açık sinyal: {open_positions_count}"
+        f"🌍 Piyasa: {regime_text} | Taranan: {total_scanned}/{total_universe}\n\n"
+        f"🟢{stage_counts.get('MAIN_BREAK', 0)} 🟡{stage_counts.get('LOCAL_BREAK', 0)} "
+        f"🔴{stage_counts.get('EXTENDED', 0)} 🟠{stage_counts.get('SETUP', 0)} "
+        f"🔵{stage_counts.get('WATCH', 0)} | Açık takip: {open_positions_count}\n\n"
+        f"🏆 En güçlü: {top3_text}"
     )
+
+
+def build_performance_summary(history):
+    """
+    Kalıcı geçmişten (state.json'daki HISTORY_KEY) kısa bir performans özeti
+    üretir. Backtest DEĞİLDİR — botun gerçek zamanlı, gerçekleşmiş sinyal
+    sonuçlarının basit bir özeti.
+
+    NOT: Bu özet HER ZAMAN o ana kadar birikmiş TÜM geçmişi kapsar (en fazla
+    MAX_HISTORY_ENTRIES kayıt) -- PERF_SUMMARY_INTERVAL_DAYS sadece ne
+    sıklıkla GÖNDERİLECEĞİNİ belirler, özetin kapsadığı süreyi değil. Yani
+    bu "haftalık performans" değil, "haftada bir hatırlatılan, o güne kadarki
+    TOPLAM performans"tır. Mesaj metni bunu "kümülatif" diyerek açıkça belirtir.
+    """
+    if not history:
+        return None
+    total = len(history)
+    wins = sum(1 for h in history if h["outcome"] == "target")
+    losses = total - wins
+    win_rate = (wins / total * 100) if total > 0 else 0.0
+    avg_pct = sum(h["pct_change"] for h in history) / total if total > 0 else 0.0
+    return (
+        f"📈 *PERFORMANS ÖZETİ* (kümülatif, toplam {total} kapanan sinyal)\n"
+        f"Hedef: {wins} ✅ | Stop: {losses} 🛑 | Kazanma oranı: %{win_rate:.0f}\n"
+        f"Ortalama getiri: {'+' if avg_pct >= 0 else ''}%{avg_pct:.1f}\n"
+        f"_Backtest değildir, botun bugüne kadarki gerçek sinyal geçmişidir._"
+    )
+
+
+def maybe_send_performance_summary(state):
+    """Son gönderimden bu yana PERF_SUMMARY_INTERVAL_DAYS gün geçtiyse
+    performans özetini gönderir. Geçmiş yoksa hiçbir şey göndermez."""
+    last_sent_str = state.get(PERF_LAST_SENT_KEY)
+    today = datetime.now().date()
+    if last_sent_str:
+        try:
+            last_sent = datetime.strptime(last_sent_str, "%Y-%m-%d").date()
+            if (today - last_sent).days < PERF_SUMMARY_INTERVAL_DAYS:
+                return  # henüz zamanı gelmedi
+        except Exception:
+            pass  # bozuk tarih varsa, aşağıda yine de göndermeyi dener
+
+    history = state.get(HISTORY_KEY, [])
+    msg = build_performance_summary(history)
+    if msg:
+        send_telegram(msg)
+    state[PERF_LAST_SENT_KEY] = today.strftime("%Y-%m-%d")
 
 # ============================================================
 # ANA TARAMA
@@ -1133,7 +1194,7 @@ def main():
 
     for i, (ticker, df) in enumerate(all_data.items(), start=1):
         try:
-            close, high, low, volume = df["Close"], df["High"], df["Low"], df["Volume"]
+            close, volume = df["Close"], df["Volume"]
             if close.iloc[-1] <= 0:
                 continue
 
@@ -1177,8 +1238,7 @@ def main():
             results.append({
                 "ticker": ticker, "close": cp, "score": score,
                 "confluence": confluence, "pullback": pullback, "levels": levels,
-                "trend": trend, "rs": rs, "stage": stage, "resistances": resistances,
-                "fib": fib,
+                "rs": rs, "stage": stage, "fib": fib,
             })
 
         except Exception:
@@ -1233,9 +1293,21 @@ def main():
     stage_counts_all = {}
     for item in results:
         stage_counts_all[item["stage"]] = stage_counts_all.get(item["stage"], 0) + 1
-    open_positions_count = sum(1 for v in state.values() if v.get("position"))
-    summary_msg = build_summary_message(stage_counts_all, len(all_data), len(BIST_TUM_LISTESI), open_positions_count, regime_ok)
+
+    # DİKKAT: HISTORY_KEY (liste) ve PERF_LAST_SENT_KEY (string) birer ticker
+    # DEĞİL, özel anahtarlar -- .get("position") çağrısı bunlarda ÇÖKER, o
+    # yüzden isinstance kontrolüyle hariç tutuyoruz.
+    open_positions_count = sum(
+        1 for k, v in state.items()
+        if k not in (HISTORY_KEY, PERF_LAST_SENT_KEY) and isinstance(v, dict) and v.get("position")
+    )
+
+    top3 = [(item["ticker"], item["score"]) for item in results[:3]]
+
+    summary_msg = build_summary_message(stage_counts_all, len(all_data), len(BIST_TUM_LISTESI), open_positions_count, regime_ok, top3)
     send_telegram(summary_msg)
+
+    maybe_send_performance_summary(state)
 
     save_state(state)
 
