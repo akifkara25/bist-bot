@@ -14,9 +14,18 @@ on:
 permissions:
   contents: write   # state.json'u geri commit'leyebilmek için gerekli
 
+# YENİ: Aynı anda birden fazla tarama çalışmasını engeller. Bu olmadan
+# (ör. zamanlanmış tarama sürerken elle "Run workflow" dendiğinde) iki iş
+# aynı state.json'a yazmaya çalışır ve biri diğerinin sonucunu ezebilir.
+concurrency:
+  group: bist-tarama
+  cancel-in-progress: false
+
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 30   # YENİ: Yahoo takılırsa iş sonsuza kadar asılı kalmasın
+
     steps:
       - name: Repo'yu çek
         uses: actions/checkout@v4
@@ -25,6 +34,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip        # YENİ: bağımlılıkları önbelleğe alır, her run ~1 dk kazandırır
 
       - name: Bağımlılıkları kur
         run: pip install -r requirements.txt
@@ -36,13 +46,28 @@ jobs:
         run: python main.py
 
       - name: state.json değişikliğini commit'le
+        if: always()   # YENİ: tarama çökse bile, o ana kadar kaydedilmiş
+                       # state (ör. kapatılmış pozisyonlar) commit'lensin.
+                       # Aksi halde gönderilmiş bildirimler kaydedilmeden
+                       # kaybolur ve bir sonraki turda TEKRAR gönderilir.
         run: |
           git config user.name "bist-scanner-bot"
           git config user.email "actions@github.com"
           if [ -f state.json ]; then
             git add state.json
-            git diff --cached --quiet || git commit -m "state güncellendi [skip ci]"
-            git push
+            if git diff --cached --quiet; then
+              echo "state.json değişmemiş, commit gerekmiyor."
+            else
+              git commit -m "state güncellendi [skip ci]"
+              # YENİ: push başarısız olursa (ör. sen bu sırada main.py'yi
+              # düzenlediysen) önce uzaktaki değişiklikleri alıp tekrar dene.
+              # Bu olmadan push reddedilir ve tüm iş kırmızıya döner.
+              git push || {
+                echo "Push reddedildi, rebase ile tekrar deneniyor..."
+                git pull --rebase --autostash
+                git push
+              }
+            fi
           else
             echo "state.json bulunamadı — script bunu oluşturmamış olabilir, commit atlanıyor."
           fi
