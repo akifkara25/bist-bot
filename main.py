@@ -969,7 +969,13 @@ def build_message(ticker, item):
     checks_text = ", ".join([k for k, v in c["checks"].items() if v and k != "sikisma"]) or "yok"
     rs_text = f"{rs['rs_change_pct']:+.1f}%" if rs.get("available") else "n/a"
 
-    fib_line = f"📐 Fib: %61.8→{fib['retr_618']:.2f} | %161.8→{fib['ext_1618']:.2f}\n" if fib else ""
+    fib_block = (
+        f"{'FIB 38.2%':<12}{fib['retr_382']:>9.2f}\n"
+        f"{'FIB 50.0%':<12}{fib['retr_500']:>9.2f}\n"
+        f"{'FIB 61.8%':<12}{fib['retr_618']:>9.2f}\n"
+        f"{'FIB 127.2%':<12}{fib['ext_1272']:>9.2f}\n"
+        f"{'FIB 161.8%':<12}{fib['ext_1618']:>9.2f}\n"
+    ) if fib else ""
 
     # DÜZELTME: MAIN_BREAK/EXTENDED'de "Giriş" olarak entry_trigger (yerel,
     # 3 günlük referans) gösterilirse, bu bazen güncel fiyatın ÜZERİNDE
@@ -981,10 +987,10 @@ def build_message(ticker, item):
     # buna dokunmuyor, SADECE mesajdaki gösterim tutarlılığı düzeliyor.
     if stage in ("MAIN_BREAK", "EXTENDED"):
         display_entry = item["close"]
-        entry_label = "Güncel fiyattan (zaten kırılmış)"
+        entry_label = "GİRİŞ ~"     # ~ = "zaten kırılmış, güncel fiyattan takip"
     else:
         display_entry = l["entry_trigger"]
-        entry_label = "Giriş"
+        entry_label = "GİRİŞ"
 
     display_risk = display_entry - l["stop"]
     if display_risk > 0:
@@ -996,19 +1002,28 @@ def build_message(ticker, item):
         # değerlere geri dön, çökme veya anlamsız sayı üretme.
         display_entry, display_risk_pct = l["entry_trigger"], l["risk_pct"]
         display_rr1, display_rr2 = l["rr1"], l["rr2"]
-        entry_label = "Giriş"
+        entry_label = "GİRİŞ"
 
     msg = (
-        f"📌 *{ticker}*\n"
-        f"{info['baslik']} | Skor {item['score']:.1f}/100 | {c['count']}/4 ({checks_text})\n\n"
-
-        f"💰 {item['close']:.2f} TL | Düzeltme %{pb['drawdown_pct']:.1f} ({pb['peak_price']:.2f}→{pb['trough_price']:.2f}) | Toparlanma %{pb['recovery_from_low_pct']:.1f}\n"
-        f"📊 RSI {c['rsi']:.1f} | MACD {'↑' if c['checks']['macd'] else '–'} | Hacim {'✓' if c['checks']['hacim'] else '–'} (RVOL {c['rvol']:.2f}x) | RS(20g) {rs_text}\n\n"
-
-        f"🎯 {entry_label}: {display_entry:.2f} | Stop: {l['stop']:.2f} (-%{display_risk_pct:.1f})\n"
-        f"Hedef 1: {l['target1']:.2f} (R/R {display_rr1:.1f}) | Hedef 2: {l['target2']:.2f} (R/R {display_rr2:.1f})\n"
-        f"{fib_line}\n"
-
+        f"📌 *{ticker}*  —  {item['close']:.2f} TL\n"
+        f"{info['baslik']}\n"
+        f"```\n"
+        f"{'SKOR':<12}{item['score']:.1f} / 100\n"
+        f"{'TEYİT':<12}{c['count']}/4  {checks_text}\n"
+        f"────────────────────────\n"
+        f"{entry_label:<12}{display_entry:>9.2f}\n"
+        f"{'STOP':<12}{l['stop']:>9.2f}   -%{display_risk_pct:.1f}\n"
+        f"{'HEDEF 1':<12}{l['target1']:>9.2f}   R/R {display_rr1:.1f}\n"
+        f"{'HEDEF 2':<12}{l['target2']:>9.2f}   R/R {display_rr2:.1f}\n"
+        f"────────────────────────\n"
+        f"{'DÜZELTME':<12}{-pb['drawdown_pct']:>8.1f}%   {pb['peak_price']:.2f} → {pb['trough_price']:.2f}\n"
+        f"{'TOPARLANMA':<12}{pb['recovery_from_low_pct']:>+8.1f}%\n"
+        f"{'RSI':<12}{c['rsi']:>9.1f}\n"
+        f"{'MACD':<12}{('↑ dönüş' if c['checks']['macd'] else '– yok'):>9}\n"
+        f"{'HACİM':<12}{('✓' if c['checks']['hacim'] else '–'):>9}   RVOL {c['rvol']:.2f}x\n"
+        f"{'BIST FARKI':<12}{rs_text:>9}   (20 gün)\n"
+        f"{fib_block}"
+        f"```\n"
         f"⚠️ _Yatırım tavsiyesi değildir._"
     )
     return msg
