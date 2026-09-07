@@ -44,6 +44,18 @@ MAX_DAILY_JUMP_PCT = 60.0
 MIN_CONFLUENCE_STRONG = 3
 MIN_CONFLUENCE_WATCH = 2
 MIN_RR = 1.3
+# WATCH için ayrı (daha gevşek ama SIFIR OLMAYAN) bir R/R tabanı. Bu olmadan
+# sistem R/R 0.1 gibi finansal olarak anlamsız ("1 lira riske at, 10 kuruş
+# kazan") sinyalleri de listeliyordu -- stres testinde tespit edildi.
+MIN_RR_WATCH = 1.0
+# Yapısal stop (düzeltme dibinin altı) girişten bu orandan daha uzaktaysa,
+# sinyal TAMAMEN elenir. Gerçek state.json verisinde stop'un girişin %43.8
+# altında kaldığı bir pozisyon (NETAS) tespit edildikten sonra eklendi:
+# fiyat düzeltme dibinden çok uzaklaşmışsa, yapısal stop orantısız uzak
+# kalıyor ve hem risk hem de ondan türeyen hedef gerçekçiliğini yitiriyor.
+# Stop'u yapay olarak yakınlaştırmak yerine sinyali elemeyi seçiyoruz --
+# çünkü dibin üstüne çekilen bir stop, dayandığı yapısal mantığı kaybeder.
+MAX_RISK_PCT = 20.0
 
 # Düzeltme (pullback) parametreleri
 PULLBACK_MIN_PCT = 4.0
@@ -564,7 +576,7 @@ def hh_hl_structure(df, swing_highs, swing_lows, lookback=LOOKBACK_STRUCTURE):
 
 
 def trend_filter(df, swing_highs, swing_lows):
-    close, high, low = df["Close"], df["High"], df["Low"]
+    close = df["Close"]
     if len(close) < 210:
         return {"ok": False, "reason": "yetersiz veri"}
 
@@ -727,7 +739,7 @@ def relative_strength(close, xu100_close, lookback=RS_LOOKBACK):
 # ============================================================
 
 def evaluate_confluence(df, pullback, swing_highs, swing_lows):
-    close, high, low, volume = df["Close"], df["High"], df["Low"], df["Volume"]
+    close, volume = df["Close"], df["Volume"]
     peak_idx, trough_idx = pullback["peak_idx"], pullback["trough_idx"]
 
     rsi = calc_rsi(close)
@@ -812,6 +824,11 @@ def calc_levels(df, pullback, resistances):
 
     risk = entry_trigger - stop
     if risk <= 0:
+        return None
+
+    # Aşırı uzak yapısal stop = gerçekçi olmayan risk VE ondan türeyen
+    # gerçekçi olmayan hedef. Böyle kurulumlar tamamen elenir (bkz. MAX_RISK_PCT).
+    if (risk / entry_trigger) * 100 > MAX_RISK_PCT:
         return None
 
     nearest_res, second_res = resistances
@@ -901,7 +918,14 @@ def compute_score(trend, pullback, confluence, rs, rr1):
 #      güven) ve MAIN_BREAK (yüksek güven). İkisi karıştırılmıyor.
 
 def determine_stage(trend, pullback, confluence, levels, cp, structural_resistance):
-    loose_ok = pullback["ok"] and confluence["count"] >= MIN_CONFLUENCE_WATCH
+    # En gevşek giriş şartı: pullback geçerli + minimum teyit + ANLAMLI bir R/R.
+    # MIN_RR_WATCH olmadan R/R 0.1 gibi finansal olarak anlamsız sinyaller de
+    # listeye giriyordu (stres testinde tespit edildi).
+    loose_ok = (
+        pullback["ok"]
+        and confluence["count"] >= MIN_CONFLUENCE_WATCH
+        and levels["rr1"] >= MIN_RR_WATCH
+    )
     if not loose_ok:
         return None
 
@@ -1190,7 +1214,17 @@ def main():
     closed_count = check_open_positions(state, all_data)
     log.info(f"   {closed_count} takip kapatıldı (hedef/stop).")
 
+    # KRİTİK: kapanış bildirimleri ZATEN GÖNDERİLDİ. Eğer state'i sadece en
+    # sonda kaydedersek ve arada bir çökme olursa, workflow commit adımına hiç
+    # ulaşmaz -> pozisyon "hâlâ açık" kalır -> bir sonraki taramada AYNI
+    # "hedefe ulaşıldı/stop" mesajı TEKRAR gönderilir. Bu yüzden kapanışları
+    # hemen burada kalıcı hale getiriyoruz.
+    if closed_count > 0:
+        save_state(state)
+        log.info("   Kapanışlar kalıcı olarak kaydedildi (mükerrer bildirim koruması).")
+
     results = []
+    error_count = 0
 
     for i, (ticker, df) in enumerate(all_data.items(), start=1):
         try:
@@ -1241,11 +1275,28 @@ def main():
                 "rs": rs, "stage": stage, "fib": fib,
             })
 
-        except Exception:
+        except Exception as e:
+            # ÖNEMLİ: eskiden burası SESSİZCE atlıyordu (sadece 'continue').
+            # Bu yüzden gerçek bir kod hatası (ör. bulunan ZigZag boş-index
+            # çökmesi) fark edilmeden onlarca hisseyi analiz dışı bırakabiliyordu.
+            # Artık sayılıyor ve loglanıyor; toplu bir sorun varsa tarama
+            # sonunda uyarı olarak da görünüyor.
+            error_count += 1
+            if error_count <= 5:  # log'u boğmamak için sadece ilk birkaçını detaylı yaz
+                log.warning(f"{ticker}: analiz hatası -> {type(e).__name__}: {e}")
             continue
 
         if i % 50 == 0:
             log.info(f"  ...{i} hisse analiz edildi")
+
+    if error_count > 0:
+        log.warning(f"⚠️ {error_count} hisse analiz sırasında hata verdi ve atlandı.")
+        if error_count > len(all_data) * 0.10:
+            send_telegram(
+                f"⚠️ *TARAMA UYARISI*\n\n{error_count}/{len(all_data)} hisse analiz "
+                f"sırasında hata verdi. Bu turdaki sonuçlar eksik olabilir — "
+                f"GitHub Actions loglarını kontrol edin."
+            )
 
     stage_order = {"MAIN_BREAK": 4, "LOCAL_BREAK": 3, "EXTENDED": 2, "SETUP": 1, "WATCH": 0}
     results.sort(key=lambda x: (stage_order[x["stage"]], x["score"]), reverse=True)
