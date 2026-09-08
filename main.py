@@ -58,6 +58,10 @@ MIN_RR_WATCH = 1.0
 # Stop'u yapay olarak yakınlaştırmak yerine sinyali elemeyi seçiyoruz --
 # çünkü dibin üstüne çekilen bir stop, dayandığı yapısal mantığı kaybeder.
 MAX_RISK_PCT = 20.0
+# Bir direnç seviyesinin "Hedef 1" olarak kullanılabilmesi için, alınan riske
+# göre en az bu oranda kazanç sunması gerekir. Altında kalırsa o direnç
+# atlanır (bir sonrakine ya da hesaplanmış hedefe geçilir). Bkz. calc_levels.
+MIN_TARGET_RR_RATIO = 1.0
 
 # Düzeltme (pullback) parametreleri
 PULLBACK_MIN_PCT = 4.0
@@ -848,9 +852,36 @@ def calc_levels(df, pullback, resistances):
     if (risk / entry_trigger) * 100 > MAX_RISK_PCT:
         return None
 
+    # HEDEF SEÇİMİ (tasarım düzeltmesi):
+    # Bu strateji "düzeltme bitti, hisse eski gücüne dönüyor" üzerine kurulu.
+    # Böyle bir kurulumda düzeltmenin ESKİ TEPESİ bir hedef değil, KIRILIM
+    # noktasıdır -- asıl hedef onun ötesindedir. Eskiden en yakın direnç
+    # koşulsuz Hedef 1 yapılıyordu; fiyat toparlanıp eski tepeye yaklaştığında
+    # bu, "24 puan riske at, 5 puan kazan" gibi anlamsız bir R/R üretiyor ve
+    # bot TAM DA BULMAK İÇİN TASARLANDIĞI kurulumları eliyordu (ölçüldü:
+    # klasik pullback senaryolarının sadece %4'ü yakalanıyordu).
+    #
+    # Artık bir direnç, alınan riske göre anlamlı bir kazanç sunmuyorsa
+    # (MIN_TARGET_RR_RATIO'dan az) Hedef 1 olarak kullanılmaz; bir sonraki
+    # dirence ya da hesaplanmış hedefe geçilir.
     nearest_res, second_res = resistances
-    target1 = nearest_res if (nearest_res and nearest_res > entry_trigger) else entry_trigger + 2 * risk
-    target2 = second_res if (second_res and second_res > target1) else entry_trigger + 3 * risk
+
+    def anlamli_hedef(seviye):
+        """Seviye, girişin üzerinde VE riske göre anlamlı kazanç sunuyor mu?"""
+        if not seviye or seviye <= entry_trigger:
+            return False
+        return (seviye - entry_trigger) >= risk * MIN_TARGET_RR_RATIO
+
+    if anlamli_hedef(nearest_res):
+        target1 = nearest_res
+    elif anlamli_hedef(second_res):
+        # En yakın direnç çok yakın kaldı -> bir sonrakini hedef al
+        target1 = second_res
+        second_res = None  # Hedef 2 için artık kullanılamaz, hesaplanana düşecek
+    else:
+        target1 = entry_trigger + 2 * risk
+
+    target2 = second_res if (second_res and second_res > target1) else max(target1 + risk, entry_trigger + 3 * risk)
 
     rr1 = (target1 - entry_trigger) / risk
     rr2 = (target2 - entry_trigger) / risk
