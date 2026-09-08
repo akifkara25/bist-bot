@@ -972,19 +972,21 @@ def build_message(ticker, item):
     c, l, pb, rs = item["confluence"], item["levels"], item["pullback"], item["rs"]
     fib = item.get("fib")
 
-    checks_text = ", ".join([k for k, v in c["checks"].items() if v and k != "sikisma"]) or "yok"
     rs_text = f"{rs['rs_change_pct']:+.1f}%" if rs.get("available") else "n/a"
 
+    # Teyit kriterleri: her biri ✅ / ❌ ile, tek satırda, sayaçla birlikte
+    kriter_isimleri = {"hacim": "Hacim", "momentum": "Momentum", "macd": "MACD", "yapi": "Yapı"}
+    kriter_parcalari = []
+    for anahtar, gosterim in kriter_isimleri.items():
+        isaret = "✅" if c["checks"].get(anahtar) else "❌"
+        kriter_parcalari.append(f"{isaret} {gosterim}")
+    kriterler_satiri = "   ".join(kriter_parcalari)
+
     fib_block = (
-        f"────────────────────────\n"
-        f"FIB  ({fib['trough_used']:.2f} → {fib['peak_used']:.2f})\n"
-        f"{'  23.6%':<12}{fib['retr_236']:>9.2f}\n"
-        f"{'  38.2%':<12}{fib['retr_382']:>9.2f}\n"
-        f"{'  50.0%':<12}{fib['retr_500']:>9.2f}\n"
-        f"{'  61.8%':<12}{fib['retr_618']:>9.2f}\n"
-        f"{'  78.6%':<12}{fib['retr_786']:>9.2f}\n"
-        f"{' 127.2%':<12}{fib['ext_1272']:>9.2f}\n"
-        f"{' 161.8%':<12}{fib['ext_1618']:>9.2f}\n"
+        f"\n📐 *FİB* ({fib['trough_used']:.2f} → {fib['peak_used']:.2f})\n"
+        f"23.6% {fib['retr_236']:.2f} · 38.2% {fib['retr_382']:.2f} · 50% {fib['retr_500']:.2f}\n"
+        f"61.8% {fib['retr_618']:.2f} · 78.6% {fib['retr_786']:.2f}\n"
+        f"127.2% {fib['ext_1272']:.2f} · 161.8% {fib['ext_1618']:.2f}\n"
     ) if fib else ""
 
     # DÜZELTME: MAIN_BREAK/EXTENDED'de "Giriş" olarak entry_trigger (yerel,
@@ -997,10 +999,10 @@ def build_message(ticker, item):
     # buna dokunmuyor, SADECE mesajdaki gösterim tutarlılığı düzeliyor.
     if stage in ("MAIN_BREAK", "EXTENDED"):
         display_entry = item["close"]
-        entry_label = "GİRİŞ ~"     # ~ = "zaten kırılmış, güncel fiyattan takip"
+        entry_not = " _(zaten kırılmış)_"
     else:
         display_entry = l["entry_trigger"]
-        entry_label = "GİRİŞ"
+        entry_not = ""
 
     display_risk = display_entry - l["stop"]
     if display_risk > 0:
@@ -1012,29 +1014,27 @@ def build_message(ticker, item):
         # değerlere geri dön, çökme veya anlamsız sayı üretme.
         display_entry, display_risk_pct = l["entry_trigger"], l["risk_pct"]
         display_rr1, display_rr2 = l["rr1"], l["rr2"]
-        entry_label = "GİRİŞ"
+        entry_not = ""
+
+    macd_isaret = "↗️" if c["checks"]["macd"] else "➖"
 
     msg = (
-        f"📌 *{ticker}*  —  {item['close']:.2f} TL\n"
         f"{info['baslik']}\n"
-        f"```\n"
-        f"{'SKOR':<12}{item['score']:.1f} / 100\n"
-        f"{'TEYİT':<12}{c['count']}/4  {checks_text}\n"
-        f"────────────────────────\n"
-        f"{entry_label:<12}{display_entry:>9.2f}\n"
-        f"{'STOP':<12}{l['stop']:>9.2f}   -%{display_risk_pct:.1f}\n"
-        f"{'HEDEF 1':<12}{l['target1']:>9.2f}   R/R {display_rr1:.1f}\n"
-        f"{'HEDEF 2':<12}{l['target2']:>9.2f}   R/R {display_rr2:.1f}\n"
-        f"────────────────────────\n"
-        f"{'DÜZELTME':<12}{-pb['drawdown_pct']:>8.1f}%   {pb['peak_price']:.2f} → {pb['trough_price']:.2f}\n"
-        f"{'TOPARLANMA':<12}{pb['recovery_from_low_pct']:>+8.1f}%\n"
-        f"{'RSI':<12}{c['rsi']:>9.1f}\n"
-        f"{'MACD':<12}{('↑ dönüş' if c['checks']['macd'] else '– yok'):>9}\n"
-        f"{'HACİM':<12}{('✓' if c['checks']['hacim'] else '–'):>9}   RVOL {c['rvol']:.2f}x\n"
-        f"{'BIST FARKI':<12}{rs_text:>9}   (20 gün)\n"
+        f"📌 *{ticker}* · {item['close']:.2f} TL · ⭐ {item['score']:.1f}\n\n"
+
+        f"*{c['count']}/4* {kriterler_satiri}\n\n"
+
+        f"🎯 *GİRİŞ*      `{display_entry:.2f}`{entry_not}\n"
+        f"🛑 *STOP*       `{l['stop']:.2f}`  ▼ %{display_risk_pct:.1f}\n"
+        f"🥇 *HEDEF 1*    `{l['target1']:.2f}`  ⚖️ {display_rr1:.1f}\n"
+        f"🥈 *HEDEF 2*    `{l['target2']:.2f}`  ⚖️ {display_rr2:.1f}\n\n"
+
+        f"📉 Düzeltme %{pb['drawdown_pct']:.1f}  ({pb['peak_price']:.2f} → {pb['trough_price']:.2f})\n"
+        f"📈 Toparlanma +%{pb['recovery_from_low_pct']:.1f}\n"
+        f"〽️ RSI {c['rsi']:.1f} · MACD {macd_isaret} · RVOL {c['rvol']:.2f}x\n"
+        f"🌍 BIST'e göre {rs_text} (20g)\n"
         f"{fib_block}"
-        f"```\n"
-        f"⚠️ _Yatırım tavsiyesi değildir._"
+        f"\n_yatırım tavsiyesi değildir_"
     )
     return msg
 
@@ -1055,26 +1055,24 @@ def build_target_hit_message(ticker, position, current_price):
     entry = position["entry"]
     gain_pct = (current_price - entry) / entry * 100 if entry > 0 else 0.0
     return (
-        f"🎉🎯🎉 *HEDEFE ULAŞILDI!* 🎉🎯🎉\n\n"
-        f"📌 *{ticker}*\n"
-        f"Giriş: {entry:.2f} TL  →  Güncel: {current_price:.2f} TL\n"
-        f"🎯 Hedef seviyesi ({position['target1']:.2f} TL) görüldü!\n\n"
-        f"📈 *KAZANÇ: +%{gain_pct:.1f}*\n\n"
-        f"_Bu sinyalin takibi burada kapatıldı._"
+        f"🎉 *HEDEFE ULAŞILDI*\n"
+        f"📌 *{ticker}* · ✅ *+%{gain_pct:.1f}*\n\n"
+        f"🎯 Giriş `{entry:.2f}` → Güncel `{current_price:.2f}`\n"
+        f"🥇 Hedef `{position['target1']:.2f}` görüldü\n\n"
+        f"_takip kapatıldı_"
     )
 
 
 def build_stop_hit_message(ticker, position, current_price):
     entry = position["entry"]
     loss_pct = (current_price - entry) / entry * 100 if entry > 0 else 0.0
-    sign = "-" if loss_pct < 0 else ""
+    sign = "-" if loss_pct < 0 else "+"
     return (
-        f"🛑 *STOP SEVİYESİ TETİKLENDİ* 🛑\n\n"
-        f"📌 *{ticker}*\n"
-        f"Giriş: {entry:.2f} TL  →  Güncel: {current_price:.2f} TL\n"
-        f"Stop seviyesi ({position['stop']:.2f} TL) tetiklendi.\n\n"
-        f"📉 *ZARAR: {sign}%{abs(loss_pct):.1f}*\n\n"
-        f"_Bu sinyalin takibi burada kapatıldı._"
+        f"🛑 *STOP TETİKLENDİ*\n"
+        f"📌 *{ticker}* · ❌ *{sign}%{abs(loss_pct):.1f}*\n\n"
+        f"🎯 Giriş `{entry:.2f}` → Güncel `{current_price:.2f}`\n"
+        f"🛑 Stop `{position['stop']:.2f}` kırıldı\n\n"
+        f"_takip kapatıldı_"
     )
 
 
@@ -1106,10 +1104,11 @@ def build_timeout_message(ticker, position, current_price, gun_sayisi):
     pct = (current_price - entry) / entry * 100 if entry > 0 else 0.0
     sign = "-" if pct < 0 else "+"
     return (
-        f"⏳ *ZAMAN AŞIMI*\n\n"
-        f"📌 *{ticker}*\n"
-        f"{gun_sayisi} gündür ne hedefe ne stop'a ulaştı, takip kapatıldı.\n"
-        f"Giriş: {entry:.2f} → Güncel: {current_price:.2f}  ({sign}%{abs(pct):.1f})"
+        f"⏳ *ZAMAN AŞIMI*\n"
+        f"📌 *{ticker}* · {sign}%{abs(pct):.1f}\n\n"
+        f"🎯 Giriş `{entry:.2f}` → Güncel `{current_price:.2f}`\n"
+        f"📅 {gun_sayisi} gündür ne hedef ne stop\n\n"
+        f"_takip kapatıldı_"
     )
 
 
@@ -1411,10 +1410,9 @@ def main():
             # hissenin olgunlaştığı an ("tren kalkıyor") net görünür.
             upgrade_line = ""
             if prev_stage and stage_order.get(stage, 0) > stage_order.get(prev_stage, 0):
-                upgrade_line = (
-                    f"⬆️ *AŞAMA YÜKSELDİ:* "
-                    f"{STAGE_INFO[prev_stage]['baslik']} → {STAGE_INFO[stage]['baslik']}\n\n"
-                )
+                # Sadece ÖNCEKİ aşamayı yaz -- yeni aşama zaten hemen altındaki
+                # başlıkta görünüyor, tekrar etmeye gerek yok.
+                upgrade_line = f"⬆️ *AŞAMA YÜKSELDİ* — önceki: {STAGE_INFO[prev_stage]['baslik']}\n\n"
 
             msg = upgrade_line + build_message(ticker, item)
             send_telegram(msg)
