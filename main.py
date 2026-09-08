@@ -33,7 +33,7 @@ MAX_MAIN_BREAK_ALERTS = 8    # Ana direnç kırılımı (en yüksek güven)
 MAX_LOCAL_BREAK_ALERTS = 8   # Yerel/erken kırılım (orta-yüksek güven, erken haber)
 MAX_EXTENDED_ALERTS = 4      # Aşırı uzamış (kovalama riski uyarısı)
 MAX_SETUP_ALERTS = 8         # Kurulum hazır, henüz kırılım yok
-MAX_WATCH_ALERTS = 6         # İzleme (düşük güven) — v5: artık mesaj GÖNDERİLMİYOR, sadece özette listeleniyor
+MAX_WATCH_ALERTS = 3         # İzleme: sadece EN YÜKSEK SKORLU 3 tanesi mesaj alır, gerisi özette listelenir
 MAX_WATCH_IN_SUMMARY = 15    # Günlük özette en fazla kaç izleme hissesi ismen yazılsın
 POSITION_TIMEOUT_DAYS = 40   # Bir takip ne hedefe ne stop'a ulaşmadan bu kadar gün geçerse zaman aşımıyla kapatılır
 
@@ -1144,6 +1144,11 @@ def determine_stage(trend, pullback, confluence, levels, cp, structural_resistan
 # bot "⬆️ AŞAMA YÜKSELDİ" diyordu. Artık ilerleme tespiti buradan yapılıyor.
 STAGE_PROGRESS = {"WATCH": 0, "SETUP": 1, "LOCAL_BREAK": 2, "MAIN_BREAK": 3, "EXTENDED": 4}
 
+# Özet mesajında hangi hissenin hangi aşamada olduğunu tek bakışta göstermek için.
+# STAGE_INFO'daki başlıklarla aynı renk kodları kullanılır.
+STAGE_EMOJI = {"WATCH": "🔵", "SETUP": "🟠", "LOCAL_BREAK": "🟡",
+               "MAIN_BREAK": "🟢", "EXTENDED": "🔴"}
+
 STAGE_INFO = {
     "WATCH": {"baslik": "🔵 İZLEME LİSTESİ"},
     "SETUP": {"baslik": "🟠 KURULUM HAZIR"},
@@ -1415,16 +1420,40 @@ def check_open_positions(state, all_data):
 
 def build_summary_message(stage_counts, total_scanned, total_universe, open_positions_count, regime_ok, top3, watch_list=None):
     regime_text = "Güçlü ✅" if regime_ok else "Zayıf ⚠️"
-    top3_text = ", ".join(f"{t} ({s:.1f})" for t, s in top3) if top3 else "yok"
+    # top3 artık (ticker, skor, aşama) üçlüsü. Aşama emojisi gösteriliyor ki
+    # "en güçlü listesinde başta ama neden mesaj gelmedi?" sorusu oluşmasın:
+    # 🔵 (İzleme) ayrı mesaj almaz, sadece bu özette listelenir.
+    if top3:
+        parcalar = []
+        for kayit in top3:
+            if len(kayit) == 3:
+                t, s, stg = kayit
+                parcalar.append(f"{STAGE_EMOJI.get(stg, '')}{t.replace('.IS', '')} ({s:.1f})")
+            else:   # geriye dönük uyumluluk (eski 2'li format)
+                t, s = kayit
+                parcalar.append(f"{t.replace('.IS', '')} ({s:.1f})")
+        top3_text = ", ".join(parcalar)
+    else:
+        top3_text = "yok"
 
     # v5 YENİ: WATCH artık ayrı mesaj göndermiyor, bunun yerine burada
     # tek satırda listeleniyor (bildirim gürültüsünü azaltmak için).
+    # İlk 3'ü SKORUYLA gösteriliyor -- izleme listesinin en güçlüleri hangileri,
+    # tek bakışta görünsün diye. Liste zaten skora göre sıralı gelir.
     watch_block = ""
     if watch_list:
-        shown = watch_list[:MAX_WATCH_IN_SUMMARY]
-        isimler = ", ".join(t.replace(".IS", "") for t in shown)
-        fazla = len(watch_list) - len(shown)
-        watch_block = f"\n\n🔵 İzleme ({len(watch_list)}): {isimler}" + (f" +{fazla} daha" if fazla > 0 else "")
+        gosterilen = watch_list[:MAX_WATCH_IN_SUMMARY]
+        parcalar = []
+        for i, kayit in enumerate(gosterilen):
+            if isinstance(kayit, (tuple, list)) and len(kayit) == 2:
+                t, s = kayit
+                ad = t.replace(".IS", "")
+                parcalar.append(f"*{ad}* ({s:.1f})" if i < 3 else ad)
+            else:   # geriye dönük uyumluluk (sadece ticker listesi)
+                parcalar.append(str(kayit).replace(".IS", ""))
+        fazla = len(watch_list) - len(gosterilen)
+        watch_block = (f"\n\n🔵 İzleme ({len(watch_list)}): " + ", ".join(parcalar)
+                       + (f" +{fazla} daha" if fazla > 0 else ""))
 
     return (
         f"📊 *TARAMA ÖZETİ*\n"
@@ -1631,13 +1660,11 @@ def main():
         stage_changed = prev_stage != stage
         score_improved = prev is not None and item["score"] >= (prev.get("score") or 0) + 8
 
-        # v5 YENİ (1): WATCH artık AYRI MESAJ GÖNDERMEZ -- sadece günlük
-        # özette tek satırda listelenir. Gerçek sinyaller (SETUP ve üzeri)
-        # kalabalıkta kaybolmasın diye.
-        if stage == "WATCH":
-            update_state(state, ticker, stage, item["score"], item["confluence"]["rvol"], item["close"])
-            continue
-
+        # WATCH artık SINIRLI olarak mesaj gönderir: sadece en yüksek skorlu
+        # MAX_WATCH_ALERTS tanesi. `results` önce aşamaya sonra skora göre
+        # sıralı geldiği için, WATCH'lar kendi içinde skora göre sıralıdır --
+        # yani ilk karşılaşılanlar en güçlü olanlardır. Geri kalanı yine
+        # sadece günlük özette listelenir (bildirim gürültüsü olmasın diye).
         if sent_counts[stage] >= max_counts[stage]:
             update_state(state, ticker, stage, item["score"], item["confluence"]["rvol"], item["close"])
             continue
@@ -1717,12 +1744,18 @@ def main():
     # veriyordu -- başlık "En güçlü" dediği halde düşük skorlu bir hisse
     # yüksek skorlunun önüne geçebiliyordu (ör. ALARK 78.2 > SOKM 82.3).
     # Artık gerçekten skora göre sıralanıyor.
-    top3 = [(item["ticker"], item["score"])
+    #
+    # EK: aşama emojisi de gönderiliyor. Çünkü skor ("kurulum ne kadar iyi")
+    # ile aşama ("fiyat nerede") FARKLI şeylerdir: en yüksek skorlu hisse
+    # WATCH'ta olabilir ve o zaman ayrı mesaj GÖNDERİLMEZ. Emoji olmadan
+    # "listede başta ama mesajı gelmedi" durumu kafa karıştırıyordu.
+    top3 = [(item["ticker"], item["score"], item["stage"])
             for item in sorted(results, key=lambda x: x["score"], reverse=True)[:3]]
 
     # v5 YENİ: WATCH hisseleri artık ayrı mesaj almıyor, özette listeleniyor.
-    # Skora göre sıralı (results zaten sıralı geliyor).
-    watch_list = [item["ticker"] for item in results if item["stage"] == "WATCH"]
+    # Skorla birlikte gönderiliyor ki ilk 3'ü skoruyla gösterilebilsin.
+    # results zaten skora göre sıralı geldiği için liste de sıralı olur.
+    watch_list = [(item["ticker"], item["score"]) for item in results if item["stage"] == "WATCH"]
 
     summary_msg = build_summary_message(stage_counts_all, len(all_data), len(BIST_TUM_LISTESI), open_positions_count, regime_ok, top3, watch_list)
     send_telegram(summary_msg)
