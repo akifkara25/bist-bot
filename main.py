@@ -382,6 +382,10 @@ def calc_atr(df, period=14):
 # çıkmak, botun kendi amacıyla doğrudan çelişir — bu bir tercih değil, ölçülmüş
 # bir uyumluluk sınırı.
 ZIGZAG_PERIOD = 15
+# Saklanacak en fazla pivot sayısı. 1 yıllık veride tipik olarak 10-40 pivot
+# oluşur; bu sınır analiz penceresini (LOOKBACK_STRUCTURE=120 gün) rahatça
+# kapsar. Bkz. compute_zigzag içindeki açıklama.
+MAX_ZIGZAG_PIVOTS = 100
 
 
 def compute_zigzag(df, period=ZIGZAG_PERIOD):
@@ -441,7 +445,16 @@ def compute_zigzag(df, period=ZIGZAG_PERIOD):
 
         if len(stack) == 0 or dirchanged:
             stack.insert(0, {"price": value, "idx": idx, "type": ptype})
-            if len(stack) > 5:
+            # KRİTİK DÜZELTME: burada eskiden sınır 5'ti (referans Pine
+            # Script'inden birebir alınmıştı). Ama o script pivotları SADECE
+            # son çizgiyi çizmek için kullanıyor; BİZ ise 120 günlük pencerede
+            # DİRENÇ ve HH/HL YAPI analizi yapıyoruz. 5'lik sınır yüzünden
+            # 300 günlük seride yalnızca 4 pivot kalıyordu ve son 120 günde
+            # çoğu zaman tek bir tepe bulunabiliyordu -> find_resistances
+            # sürekli "direnç yok" dönüyor, hedefler gerçek dirence değil
+            # hesaplanmış tahmine düşüyordu. Sınır, analiz penceresini
+            # rahatça kapsayacak şekilde yükseltildi.
+            if len(stack) > MAX_ZIGZAG_PIVOTS:
                 stack.pop()
         else:
             current = stack[0]
