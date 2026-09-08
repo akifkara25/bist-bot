@@ -1588,17 +1588,36 @@ def main():
             sent_counts[stage] += 1
             time.sleep(0.5)
 
-            # sadece gerçekten tetiklenmiş (LOCAL_BREAK/MAIN_BREAK/EXTENDED)
-            # ve YENİ gönderilen bir sinyal için takip pozisyonu aç/değiştir.
+            # Sadece gerçekten tetiklenmiş (LOCAL_BREAK/MAIN_BREAK/EXTENDED)
+            # ve YENİ gönderilen bir sinyal için takip pozisyonu açılır.
             if stage in TRACKED_STAGES:
-                l = item["levels"]
-                new_position = {
-                    "entry": l["entry_trigger"], "stop": l["stop"],
-                    "target1": l["target1"], "target2": l["target2"],
-                    "opened_date": datetime.now().strftime("%Y-%m-%d"),
-                }
-                update_state(state, ticker, stage, item["score"],
-                             item["confluence"]["rvol"], item["close"], position=new_position)
+                mevcut_pozisyon = prev.get("position") if isinstance(prev, dict) else None
+
+                # KRİTİK DÜZELTME: Zaten AÇIK bir pozisyon varsa ÜZERİNE YAZILMAZ.
+                # Eskiden yazılıyordu ve bu, aşamalar gidip geldiğinde
+                # (ör. MAIN_BREAK -> WATCH -> MAIN_BREAK) üç ayrı soruna yol
+                # açıyordu:
+                #  1) İlk pozisyon hiç sonuçlanmadan siliniyordu -> gerçekleşen
+                #     zarar geçmişe HİÇ yazılmıyor, performans istatistikleri
+                #     olduğundan iyi görünüyordu.
+                #  2) Fiyat düştüğü için stop yeniden ve DAHA AŞAĞIDAN
+                #     hesaplanıyordu -> risk sessizce büyüyordu.
+                #  3) Zaman aşımı sayacı sıfırlanıyordu -> sürekli gidip gelen
+                #     bir hisse asla zaman aşımına düşmüyordu.
+                # Artık açık pozisyon, hedefe/stopa/zaman aşımına ulaşana kadar
+                # OLDUĞU GİBİ korunur; yeni pozisyon ancak eski kapandıysa açılır.
+                if mevcut_pozisyon:
+                    update_state(state, ticker, stage, item["score"],
+                                 item["confluence"]["rvol"], item["close"])
+                else:
+                    l = item["levels"]
+                    new_position = {
+                        "entry": l["entry_trigger"], "stop": l["stop"],
+                        "target1": l["target1"], "target2": l["target2"],
+                        "opened_date": datetime.now().strftime("%Y-%m-%d"),
+                    }
+                    update_state(state, ticker, stage, item["score"],
+                                 item["confluence"]["rvol"], item["close"], position=new_position)
                 continue  # update_state zaten çağrıldı, aşağıdaki genel çağrıyı atla
 
         update_state(state, ticker, stage, item["score"], item["confluence"]["rvol"], item["close"])
