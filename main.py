@@ -553,8 +553,19 @@ def calc_fibonacci_levels(peak_price, trough_price):
     detect_pullback()'in ZATEN bulduğu aynı tepe/dip noktalarından
     hesaplanır; yeni bir tespit algoritması eklenmiyor, sadece aritmetik.
 
-    Retracement (geri çekilme, dipten tepeye doğru %'ler) ve extension
-    (uzatma, tepenin ötesi ek referans hedefler) seviyeleri döner.
+    ÖLÇÜM YÖNÜ (düzeltildi): Geri çekilme seviyeleri TEPEDEN AŞAĞIYA doğru
+    ölçülür -- yani "%61.8", fiyatın tepeden dibe doğru yolun %61.8'ini geri
+    verdiği seviyedir. Bu, TradingView'in ve genel teknik analiz literatürünün
+    standart yönüdür.
+
+    Eskiden DİPTEN YUKARIYA ölçülüyordu; fiyatlar aynıydı ama etiketler
+    TERSTİ (bizim "%38.2" dediğimiz, TradingView'in "%61.8"iydi). Kullanıcı
+    grafikle karşılaştırdığında kafa karışıklığı yaratıyordu ve "altın oran
+    %61.8 desteği" gibi yerleşik kavramlar yanlış seviyeye işaret ediyordu.
+
+    Uzatma (extension) seviyeleri tepenin ÜZERİNDEDİR ve dipten ölçülen
+    klasik 1.272 / 1.618 çarpanlarıdır (TradingView bunları -0.272 / -0.618
+    olarak etiketler; fiyatlar birebir aynıdır).
     """
     diff = peak_price - trough_price
     if diff <= 0:
@@ -563,11 +574,11 @@ def calc_fibonacci_levels(peak_price, trough_price):
     return {
         "peak_used": peak_price,      # şeffaflık: hangi tepe/dipten hesaplandığı
         "trough_used": trough_price,  # mesajda gösteriliyor, elle teyit edilebilsin
-        "retr_236": trough_price + diff * 0.236,
-        "retr_382": trough_price + diff * 0.382,
-        "retr_500": trough_price + diff * 0.5,
-        "retr_618": trough_price + diff * 0.618,
-        "retr_786": trough_price + diff * 0.786,
+        "retr_236": peak_price - diff * 0.236,
+        "retr_382": peak_price - diff * 0.382,
+        "retr_500": peak_price - diff * 0.5,
+        "retr_618": peak_price - diff * 0.618,
+        "retr_786": peak_price - diff * 0.786,
         "ext_1272": trough_price + diff * 1.272,
         "ext_1618": trough_price + diff * 1.618,
     }
@@ -1159,10 +1170,11 @@ def build_message(ticker, item):
     kriterler_satiri = "   ".join(kriter_parcalari)
 
     fib_block = (
-        f"\n📐 *FİB* ({fib['trough_used']:.2f} → {fib['peak_used']:.2f})\n"
+        f"\n📐 *FİB* (tepe {fib['peak_used']:.2f} → dip {fib['trough_used']:.2f})\n"
+        f"_geri çekilme (destek):_\n"
         f"23.6% {fib['retr_236']:.2f} · 38.2% {fib['retr_382']:.2f} · 50% {fib['retr_500']:.2f}\n"
         f"61.8% {fib['retr_618']:.2f} · 78.6% {fib['retr_786']:.2f}\n"
-        f"127.2% {fib['ext_1272']:.2f} · 161.8% {fib['ext_1618']:.2f}\n"
+        f"_uzatma (hedef):_ 1.272 {fib['ext_1272']:.2f} · 1.618 {fib['ext_1618']:.2f}\n"
     ) if fib else ""
 
     # DÜZELTME: MAIN_BREAK/EXTENDED'de "Giriş" olarak entry_trigger (yerel,
