@@ -1515,7 +1515,13 @@ def main():
         if k not in (HISTORY_KEY, PERF_LAST_SENT_KEY) and isinstance(v, dict) and v.get("position")
     )
 
-    top3 = [(item["ticker"], item["score"]) for item in results[:3]]
+    # DÜZELTME: results, ÖNCE aşamaya sonra skora göre sıralı olduğu için
+    # results[:3] almak "en yüksek skorlu 3" DEĞİL, "en ileri aşamadaki 3"
+    # veriyordu -- başlık "En güçlü" dediği halde düşük skorlu bir hisse
+    # yüksek skorlunun önüne geçebiliyordu (ör. ALARK 78.2 > SOKM 82.3).
+    # Artık gerçekten skora göre sıralanıyor.
+    top3 = [(item["ticker"], item["score"])
+            for item in sorted(results, key=lambda x: x["score"], reverse=True)[:3]]
 
     # v5 YENİ: WATCH hisseleri artık ayrı mesaj almıyor, özette listeleniyor.
     # Skora göre sıralı (results zaten sıralı geliyor).
