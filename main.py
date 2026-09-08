@@ -1125,9 +1125,35 @@ def check_open_positions(state, all_data):
     for ticker, info in list(state.items()):
         if ticker == HISTORY_KEY or ticker == PERF_LAST_SENT_KEY:
             continue
+
+        # DAYANIKLILIK (bakım turunda tespit edildi): state.json elle
+        # düzenlenmiş, yarıda kesilmiş ya da eski bir sürümden kalmışsa
+        # kayıtlar bozuk olabilir. Bu fonksiyon taramanın EN BAŞINDA
+        # çalıştığı için, buradaki bir çökme TÜM taramayı öldürür.
+        # O yüzden her kaydın yapısını kullanmadan ÖNCE doğruluyoruz.
+        if not isinstance(info, dict):
+            log.warning(f"{ticker}: state kaydı sözlük değil, atlandı")
+            continue
         position = info.get("position")
         if not position:
             continue
+        if not isinstance(position, dict):
+            log.warning(f"{ticker}: position bozuk (sözlük değil), temizlendi")
+            state[ticker]["position"] = None
+            continue
+        gerekli = ("entry", "stop", "target1")
+        if not all(k in position for k in gerekli):
+            log.warning(f"{ticker}: position eksik alanlı, temizlendi")
+            state[ticker]["position"] = None
+            continue
+        try:
+            if not all(isinstance(position[k], (int, float)) for k in gerekli):
+                raise TypeError("sayısal olmayan seviye")
+        except Exception:
+            log.warning(f"{ticker}: position seviyeleri sayısal değil, temizlendi")
+            state[ticker]["position"] = None
+            continue
+
         if ticker not in all_data:
             continue  # bu turda veri gelmedi, bir sonraki taramaya bırakılır
 
