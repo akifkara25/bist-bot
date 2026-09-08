@@ -332,7 +332,18 @@ def calc_rsi(series, period=14):
     avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+
+    # UÇ DURUM DÜZELTMESİ: avg_loss == 0 iken (hiç düşüş günü yok) yukarıdaki
+    # bölme NaN üretiyordu -- oysa tanım gereği RSI 100 olmalı. NaN, mesajda
+    # "RSI nan" olarak görünür ve momentum kontrollerini sessizce False yapardı.
+    # Gerçek hisselerde nadir ama mümkün (çok kısa/kesintisiz yükseliş serileri).
+    hic_kayip_yok = (avg_loss == 0) & (avg_gain > 0)
+    rsi = rsi.mask(hic_kayip_yok, 100.0)
+    # Hem kayıp hem kazanç sıfırsa (fiyat hiç değişmemiş) nötr kabul edilir.
+    hic_hareket_yok = (avg_loss == 0) & (avg_gain == 0)
+    rsi = rsi.mask(hic_hareket_yok, 50.0)
+    return rsi
 
 
 def calc_macd(close):
