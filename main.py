@@ -33,7 +33,9 @@ MAX_MAIN_BREAK_ALERTS = 8    # Ana direnç kırılımı (en yüksek güven)
 MAX_LOCAL_BREAK_ALERTS = 8   # Yerel/erken kırılım (orta-yüksek güven, erken haber)
 MAX_EXTENDED_ALERTS = 4      # Aşırı uzamış (kovalama riski uyarısı)
 MAX_SETUP_ALERTS = 8         # Kurulum hazır, henüz kırılım yok
-MAX_WATCH_ALERTS = 6         # İzleme (düşük güven)
+MAX_WATCH_ALERTS = 6         # İzleme (düşük güven) — v5: artık mesaj GÖNDERİLMİYOR, sadece özette listeleniyor
+MAX_WATCH_IN_SUMMARY = 15    # Günlük özette en fazla kaç izleme hissesi ismen yazılsın
+POSITION_TIMEOUT_DAYS = 40   # Bir takip ne hedefe ne stop'a ulaşmadan bu kadar gün geçerse zaman aşımıyla kapatılır
 
 # --- Veri kalitesi eşikleri ---
 MAX_STALE_DAYS = 5
@@ -483,9 +485,13 @@ def calc_fibonacci_levels(peak_price, trough_price):
         return None
 
     return {
+        "peak_used": peak_price,      # şeffaflık: hangi tepe/dipten hesaplandığı
+        "trough_used": trough_price,  # mesajda gösteriliyor, elle teyit edilebilsin
+        "retr_236": trough_price + diff * 0.236,
         "retr_382": trough_price + diff * 0.382,
         "retr_500": trough_price + diff * 0.5,
         "retr_618": trough_price + diff * 0.618,
+        "retr_786": trough_price + diff * 0.786,
         "ext_1272": trough_price + diff * 1.272,
         "ext_1618": trough_price + diff * 1.618,
     }
@@ -970,11 +976,15 @@ def build_message(ticker, item):
     rs_text = f"{rs['rs_change_pct']:+.1f}%" if rs.get("available") else "n/a"
 
     fib_block = (
-        f"{'FIB 38.2%':<12}{fib['retr_382']:>9.2f}\n"
-        f"{'FIB 50.0%':<12}{fib['retr_500']:>9.2f}\n"
-        f"{'FIB 61.8%':<12}{fib['retr_618']:>9.2f}\n"
-        f"{'FIB 127.2%':<12}{fib['ext_1272']:>9.2f}\n"
-        f"{'FIB 161.8%':<12}{fib['ext_1618']:>9.2f}\n"
+        f"────────────────────────\n"
+        f"FIB  ({fib['trough_used']:.2f} → {fib['peak_used']:.2f})\n"
+        f"{'  23.6%':<12}{fib['retr_236']:>9.2f}\n"
+        f"{'  38.2%':<12}{fib['retr_382']:>9.2f}\n"
+        f"{'  50.0%':<12}{fib['retr_500']:>9.2f}\n"
+        f"{'  61.8%':<12}{fib['retr_618']:>9.2f}\n"
+        f"{'  78.6%':<12}{fib['retr_786']:>9.2f}\n"
+        f"{' 127.2%':<12}{fib['ext_1272']:>9.2f}\n"
+        f"{' 161.8%':<12}{fib['ext_1618']:>9.2f}\n"
     ) if fib else ""
 
     # DÜZELTME: MAIN_BREAK/EXTENDED'de "Giriş" olarak entry_trigger (yerel,
@@ -1091,6 +1101,18 @@ def add_to_history(state, ticker, outcome, position, exit_price):
     state[HISTORY_KEY] = history
 
 
+def build_timeout_message(ticker, position, current_price, gun_sayisi):
+    entry = position["entry"]
+    pct = (current_price - entry) / entry * 100 if entry > 0 else 0.0
+    sign = "-" if pct < 0 else "+"
+    return (
+        f"⏳ *ZAMAN AŞIMI*\n\n"
+        f"📌 *{ticker}*\n"
+        f"{gun_sayisi} gündür ne hedefe ne stop'a ulaştı, takip kapatıldı.\n"
+        f"Giriş: {entry:.2f} → Güncel: {current_price:.2f}  ({sign}%{abs(pct):.1f})"
+    )
+
+
 def check_open_positions(state, all_data):
     """
     Daha önce LOCAL_BREAK/MAIN_BREAK/EXTENDED ile açılmış (ve henüz
@@ -1127,6 +1149,24 @@ def check_open_positions(state, all_data):
             state[ticker]["position"] = None
             closed += 1
             time.sleep(0.5)
+        else:
+            # v5 YENİ (3): ZAMAN AŞIMI. Ne hedefe ne stop'a ulaşmadan çok uzun
+            # süre açık kalan takipler birikiyor, hem listeyi şişiriyor hem de
+            # performans istatistiklerinde sonsuza kadar "sonuçsuz" kalıyordu.
+            opened = position.get("opened_date")
+            if not opened:
+                continue
+            try:
+                opened_date = datetime.strptime(opened, "%Y-%m-%d").date()
+            except Exception:
+                continue  # bozuk tarih -> dokunma, açık kalsın
+            gun_gecti = (datetime.now().date() - opened_date).days
+            if gun_gecti >= POSITION_TIMEOUT_DAYS:
+                send_telegram(build_timeout_message(ticker, position, current_price, gun_gecti))
+                add_to_history(state, ticker, "timeout", position, current_price)
+                state[ticker]["position"] = None
+                closed += 1
+                time.sleep(0.5)
 
     return closed
 
@@ -1134,9 +1174,19 @@ def check_open_positions(state, all_data):
 # GÜNLÜK ÖZET (v4 — yeni)
 # ============================================================
 
-def build_summary_message(stage_counts, total_scanned, total_universe, open_positions_count, regime_ok, top3):
+def build_summary_message(stage_counts, total_scanned, total_universe, open_positions_count, regime_ok, top3, watch_list=None):
     regime_text = "Güçlü ✅" if regime_ok else "Zayıf ⚠️"
     top3_text = ", ".join(f"{t} ({s:.1f})" for t, s in top3) if top3 else "yok"
+
+    # v5 YENİ: WATCH artık ayrı mesaj göndermiyor, bunun yerine burada
+    # tek satırda listeleniyor (bildirim gürültüsünü azaltmak için).
+    watch_block = ""
+    if watch_list:
+        shown = watch_list[:MAX_WATCH_IN_SUMMARY]
+        isimler = ", ".join(t.replace(".IS", "") for t in shown)
+        fazla = len(watch_list) - len(shown)
+        watch_block = f"\n\n🔵 İzleme ({len(watch_list)}): {isimler}" + (f" +{fazla} daha" if fazla > 0 else "")
+
     return (
         f"📊 *TARAMA ÖZETİ*\n"
         f"{market_session_label()}\n"
@@ -1145,6 +1195,7 @@ def build_summary_message(stage_counts, total_scanned, total_universe, open_posi
         f"🔴{stage_counts.get('EXTENDED', 0)} 🟠{stage_counts.get('SETUP', 0)} "
         f"🔵{stage_counts.get('WATCH', 0)} | Açık takip: {open_positions_count}\n\n"
         f"🏆 En güçlü: {top3_text}"
+        f"{watch_block}"
     )
 
 
@@ -1164,12 +1215,22 @@ def build_performance_summary(history):
         return None
     total = len(history)
     wins = sum(1 for h in history if h["outcome"] == "target")
-    losses = total - wins
-    win_rate = (wins / total * 100) if total > 0 else 0.0
+    losses = sum(1 for h in history if h["outcome"] == "stop")
+    # v5: zaman aşımları AYRI sayılır. Eskiden "losses = total - wins" idi ve
+    # timeout'lar yanlışlıkla STOP gibi sayılıyordu -- kazanma oranını
+    # olduğundan kötü gösterirdi.
+    timeouts = sum(1 for h in history if h["outcome"] == "timeout")
+
+    # Kazanma oranı sadece NET sonuçlanan (hedef/stop) işlemler üzerinden.
+    decided = wins + losses
+    win_rate = (wins / decided * 100) if decided > 0 else 0.0
     avg_pct = sum(h["pct_change"] for h in history) / total if total > 0 else 0.0
+
+    timeout_text = f" | Zaman aşımı: {timeouts} ⏳" if timeouts else ""
     return (
         f"📈 *PERFORMANS ÖZETİ* (kümülatif, toplam {total} kapanan sinyal)\n"
-        f"Hedef: {wins} ✅ | Stop: {losses} 🛑 | Kazanma oranı: %{win_rate:.0f}\n"
+        f"Hedef: {wins} ✅ | Stop: {losses} 🛑{timeout_text}\n"
+        f"Kazanma oranı: %{win_rate:.0f} (hedef/stop arasında)\n"
         f"Ortalama getiri: {'+' if avg_pct >= 0 else ''}%{avg_pct:.1f}\n"
         f"_Backtest değildir, botun bugüne kadarki gerçek sinyal geçmişidir._"
     )
@@ -1324,24 +1385,44 @@ def main():
 
     for item in results:
         stage = item["stage"]
-        if sent_counts[stage] >= max_counts[stage]:
+        ticker = item["ticker"]
+        prev = get_previous_state(state, ticker)
+        prev_stage = prev.get("stage") if prev else None
+
+        stage_changed = prev_stage != stage
+        score_improved = prev is not None and item["score"] >= (prev.get("score") or 0) + 8
+
+        # v5 YENİ (1): WATCH artık AYRI MESAJ GÖNDERMEZ -- sadece günlük
+        # özette tek satırda listelenir. Gerçek sinyaller (SETUP ve üzeri)
+        # kalabalıkta kaybolmasın diye.
+        if stage == "WATCH":
+            update_state(state, ticker, stage, item["score"], item["confluence"]["rvol"], item["close"])
             continue
 
-        prev = get_previous_state(state, item["ticker"])
-        stage_changed = prev is None or prev.get("stage") != stage
-        score_improved = prev is not None and item["score"] >= (prev.get("score") or 0) + 8
+        if sent_counts[stage] >= max_counts[stage]:
+            update_state(state, ticker, stage, item["score"], item["confluence"]["rvol"], item["close"])
+            continue
+
         should_notify = stage_changed or score_improved
 
         if should_notify:
-            msg = build_message(item["ticker"], item)
+            # v5 YENİ (2): Aşama YÜKSELDİYSE, mesajın başına bunu belirten bir
+            # satır eklenir ("Kurulum Hazır -> Erken Kırılım"). Böylece bir
+            # hissenin olgunlaştığı an ("tren kalkıyor") net görünür.
+            upgrade_line = ""
+            if prev_stage and stage_order.get(stage, 0) > stage_order.get(prev_stage, 0):
+                upgrade_line = (
+                    f"⬆️ *AŞAMA YÜKSELDİ:* "
+                    f"{STAGE_INFO[prev_stage]['baslik']} → {STAGE_INFO[stage]['baslik']}\n\n"
+                )
+
+            msg = upgrade_line + build_message(ticker, item)
             send_telegram(msg)
             sent_counts[stage] += 1
             time.sleep(0.5)
 
-            # v4 YENİ: sadece gerçekten tetiklenmiş (LOCAL_BREAK/MAIN_BREAK/EXTENDED)
+            # sadece gerçekten tetiklenmiş (LOCAL_BREAK/MAIN_BREAK/EXTENDED)
             # ve YENİ gönderilen bir sinyal için takip pozisyonu aç/değiştir.
-            # should_notify=False olan (yani mesaj gönderilmeyen, sadece aynı
-            # aşamada kalan) durumlarda ESKİ pozisyon dokunulmadan kalır.
             if stage in TRACKED_STAGES:
                 l = item["levels"]
                 new_position = {
@@ -1349,11 +1430,11 @@ def main():
                     "target1": l["target1"], "target2": l["target2"],
                     "opened_date": datetime.now().strftime("%Y-%m-%d"),
                 }
-                update_state(state, item["ticker"], stage, item["score"],
+                update_state(state, ticker, stage, item["score"],
                              item["confluence"]["rvol"], item["close"], position=new_position)
                 continue  # update_state zaten çağrıldı, aşağıdaki genel çağrıyı atla
 
-        update_state(state, item["ticker"], stage, item["score"], item["confluence"]["rvol"], item["close"])
+        update_state(state, ticker, stage, item["score"], item["confluence"]["rvol"], item["close"])
 
     # --- v4 YENİ: günlük özet mesajı (her taramada gönderilir, sessizlik ile arıza ayrımı için) ---
     stage_counts_all = {}
@@ -1370,7 +1451,11 @@ def main():
 
     top3 = [(item["ticker"], item["score"]) for item in results[:3]]
 
-    summary_msg = build_summary_message(stage_counts_all, len(all_data), len(BIST_TUM_LISTESI), open_positions_count, regime_ok, top3)
+    # v5 YENİ: WATCH hisseleri artık ayrı mesaj almıyor, özette listeleniyor.
+    # Skora göre sıralı (results zaten sıralı geliyor).
+    watch_list = [item["ticker"] for item in results if item["stage"] == "WATCH"]
+
+    summary_msg = build_summary_message(stage_counts_all, len(all_data), len(BIST_TUM_LISTESI), open_positions_count, regime_ok, top3, watch_list)
     send_telegram(summary_msg)
 
     maybe_send_performance_summary(state)
