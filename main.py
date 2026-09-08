@@ -1192,6 +1192,12 @@ def build_message(ticker, item):
         display_rr1, display_rr2 = l["rr1"], l["rr2"]
         entry_not = ""
 
+    # Hedeflerin GİRİŞE göre kazanç yüzdeleri. Stop satırındaki kayıp
+    # yüzdesiyle SİMETRİK olsun diye aynı `display_entry` referansı kullanılır --
+    # böylece "ne kaybederim / ne kazanırım" aynı temelden okunur.
+    hedef1_pct = (l["target1"] - display_entry) / display_entry * 100 if display_entry > 0 else 0.0
+    hedef2_pct = (l["target2"] - display_entry) / display_entry * 100 if display_entry > 0 else 0.0
+
     macd_isaret = "↗️" if c["checks"]["macd"] else "➖"
 
     # Uyumsuzluk satırı: sadece gerçekten bir uyumsuzluk varsa gösterilir.
@@ -1221,8 +1227,8 @@ def build_message(ticker, item):
 
         f"🎯 *GİRİŞ*      `{display_entry:.2f}`{entry_not}\n"
         f"🛑 *STOP*       `{l['stop']:.2f}`  ▼ %{display_risk_pct:.1f}\n"
-        f"🥇 *HEDEF 1*    `{l['target1']:.2f}`  ⚖️ {display_rr1:.1f}\n"
-        f"🥈 *HEDEF 2*    `{l['target2']:.2f}`  ⚖️ {display_rr2:.1f}\n\n"
+        f"🥇 *HEDEF 1*    `{l['target1']:.2f}`  ▲ %{hedef1_pct:.1f}  ⚖️ {display_rr1:.1f}\n"
+        f"🥈 *HEDEF 2*    `{l['target2']:.2f}`  ▲ %{hedef2_pct:.1f}  ⚖️ {display_rr2:.1f}\n\n"
 
         f"📉 Düzeltme %{pb['drawdown_pct']:.1f}  ({pb['peak_price']:.2f} → {pb['trough_price']:.2f})\n"
         f"📈 Toparlanma +%{pb['recovery_from_low_pct']:.1f}\n"
