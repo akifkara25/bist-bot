@@ -223,18 +223,53 @@ def update_state(state, ticker, stage, score, rvol, close, position=None, clear_
 # ============================================================
 
 def send_telegram(message):
+    """
+    Telegram'a mesaj gönderir. 429 (rate-limit) ve geçici sunucu hatalarında
+    TEKRAR DENER -- eskiden denemiyordu ve rate-limit'e takılan mesaj sessizce
+    KAYBOLUYORDU (ör. hedefe ulaşma bildirimi hiç gelmeyebilirdi).
+    Kalıcı hatalarda (400 gibi, bozuk Markdown) tekrar denemek anlamsızdır,
+    hemen vazgeçilir.
+    """
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown", "disable_web_page_preview": True}
-    try:
-        r = requests.post(url, json=payload, timeout=15)
-        if r.status_code != 200:
+
+    for deneme in range(1, TELEGRAM_MAX_RETRIES + 1):
+        try:
+            r = requests.post(url, json=payload, timeout=15)
+            if r.status_code == 200:
+                return True
+
+            if r.status_code == 429:
+                bekle = 5
+                try:
+                    bekle = int(r.json().get("parameters", {}).get("retry_after", 5))
+                except Exception:
+                    pass
+                bekle = max(1, min(bekle, 60))   # 1-60 sn arasında tut
+                log.warning(f"Telegram rate-limit (429), {bekle}sn bekleniyor "
+                            f"(deneme {deneme}/{TELEGRAM_MAX_RETRIES})")
+                time.sleep(bekle)
+                continue
+
+            if 500 <= r.status_code < 600:
+                log.warning(f"Telegram sunucu hatası ({r.status_code}), tekrar denenecek "
+                            f"(deneme {deneme}/{TELEGRAM_MAX_RETRIES})")
+                time.sleep(3 * deneme)
+                continue
+
+            # 400 vb. kalıcı hata -> tekrar denemek anlamsız
             log.error(f"Telegram gönderim hatası ({r.status_code}): {r.text[:300]}")
-        return r.status_code == 200
-    except Exception as e:
-        log.error(f"Telegram gönderim istisnası: {e}")
-        return False
+            return False
+
+        except Exception as e:
+            log.error(f"Telegram gönderim istisnası (deneme {deneme}/{TELEGRAM_MAX_RETRIES}): {e}")
+            if deneme < TELEGRAM_MAX_RETRIES:
+                time.sleep(3 * deneme)
+
+    log.error("Telegram mesajı tüm denemelere rağmen gönderilemedi.")
+    return False
 
 # ============================================================
 # VERİ ÇEKME
@@ -386,6 +421,15 @@ ZIGZAG_PERIOD = 15
 # oluşur; bu sınır analiz penceresini (LOOKBACK_STRUCTURE=120 gün) rahatça
 # kapsar. Bkz. compute_zigzag içindeki açıklama.
 MAX_ZIGZAG_PIVOTS = 100
+
+# --- TELEGRAM GÖNDERİM AYARLARI ---
+# Telegram'ın grup sohbetleri için pratik sınırı ~20 mesaj/dakika. Eskiden
+# mesajlar arası 0.5sn bekleniyordu (=120 mesaj/dk) -- yani sınırın 6 katı,
+# yoğun bir taramada 429 alıp mesaj KAYBETME riski vardı. 3 saniye, sınırın
+# güvenli tarafında kalır (~20/dk) ve en yoğun taramada bile toplam süreye
+# yalnızca ~2 dakika ekler (30 dakikalık iş limitinin çok altında).
+MESSAGE_DELAY_SECONDS = 3.0
+TELEGRAM_MAX_RETRIES = 3
 
 
 def compute_zigzag(df, period=ZIGZAG_PERIOD):
@@ -1080,6 +1124,15 @@ def determine_stage(trend, pullback, confluence, levels, cp, structural_resistan
 # MESAJ OLUŞTURMA (v3 — Türkçe, kategorik, daha anlaşılır)
 # ============================================================
 
+# Fiyat yükseldikçe aşamalar KRONOLOJİK olarak şöyle ilerler:
+#   SETUP -> LOCAL_BREAK -> MAIN_BREAK -> EXTENDED
+# Bu, main() içindeki `stage_order`dan (GÖRÜNTÜLEME önceliği) FARKLIDIR:
+# orada EXTENDED bilerek düşük tutulur, çünkü "kovalama riski" uyarısıdır ve
+# listenin başında yer almamalıdır. İki kavramı tek sözlükle yönetmek şu
+# hataya yol açıyordu: fiyat GERİLEYİP EXTENDED'den MAIN_BREAK'e düştüğünde
+# bot "⬆️ AŞAMA YÜKSELDİ" diyordu. Artık ilerleme tespiti buradan yapılıyor.
+STAGE_PROGRESS = {"WATCH": 0, "SETUP": 1, "LOCAL_BREAK": 2, "MAIN_BREAK": 3, "EXTENDED": 4}
+
 STAGE_INFO = {
     "WATCH": {"baslik": "🔵 İZLEME LİSTESİ"},
     "SETUP": {"baslik": "🟠 KURULUM HAZIR"},
@@ -1310,13 +1363,13 @@ def check_open_positions(state, all_data):
             add_to_history(state, ticker, "target", position, current_price)
             state[ticker]["position"] = None
             closed += 1
-            time.sleep(0.5)
+            time.sleep(MESSAGE_DELAY_SECONDS)
         elif current_price <= position["stop"]:
             send_telegram(build_stop_hit_message(ticker, position, current_price))
             add_to_history(state, ticker, "stop", position, current_price)
             state[ticker]["position"] = None
             closed += 1
-            time.sleep(0.5)
+            time.sleep(MESSAGE_DELAY_SECONDS)
         else:
             # v5 YENİ (3): ZAMAN AŞIMI. Ne hedefe ne stop'a ulaşmadan çok uzun
             # süre açık kalan takipler birikiyor, hem listeyi şişiriyor hem de
@@ -1334,7 +1387,7 @@ def check_open_positions(state, all_data):
                 add_to_history(state, ticker, "timeout", position, current_price)
                 state[ticker]["position"] = None
                 closed += 1
-                time.sleep(0.5)
+                time.sleep(MESSAGE_DELAY_SECONDS)
 
     return closed
 
@@ -1578,7 +1631,13 @@ def main():
             # satır eklenir ("Kurulum Hazır -> Erken Kırılım"). Böylece bir
             # hissenin olgunlaştığı an ("tren kalkıyor") net görünür.
             upgrade_line = ""
-            if prev_stage and stage_order.get(stage, 0) > stage_order.get(prev_stage, 0):
+            # İlerleme tespiti KRONOLOJİK sıralamadan (STAGE_PROGRESS) yapılır,
+            # görüntüleme önceliğinden (stage_order) DEĞİL -- ikisi farklı şeyler.
+            # EXTENDED'e geçişte bu satır GÖSTERİLMEZ: teknik olarak ileri bir
+            # aşama ama "aşırı uzamış, kovalama riski" uyarısıdır; başına
+            # "⬆️ AŞAMA YÜKSELDİ" yazmak yanıltıcı olur (başlık zaten uyarıyor).
+            if (prev_stage and stage != "EXTENDED"
+                    and STAGE_PROGRESS.get(stage, 0) > STAGE_PROGRESS.get(prev_stage, 0)):
                 # Sadece ÖNCEKİ aşamayı yaz -- yeni aşama zaten hemen altındaki
                 # başlıkta görünüyor, tekrar etmeye gerek yok.
                 upgrade_line = f"⬆️ *AŞAMA YÜKSELDİ* — önceki: {STAGE_INFO[prev_stage]['baslik']}\n\n"
@@ -1586,7 +1645,7 @@ def main():
             msg = upgrade_line + build_message(ticker, item)
             send_telegram(msg)
             sent_counts[stage] += 1
-            time.sleep(0.5)
+            time.sleep(MESSAGE_DELAY_SECONDS)
 
             # Sadece gerçekten tetiklenmiş (LOCAL_BREAK/MAIN_BREAK/EXTENDED)
             # ve YENİ gönderilen bir sinyal için takip pozisyonu açılır.
