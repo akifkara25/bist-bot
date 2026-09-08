@@ -62,6 +62,10 @@ MAX_RISK_PCT = 20.0
 # göre en az bu oranda kazanç sunması gerekir. Altında kalırsa o direnç
 # atlanır (bir sonrakine ya da hesaplanmış hedefe geçilir). Bkz. calc_levels.
 MIN_TARGET_RR_RATIO = 1.0
+# UYUMSUZLUK (divergence) puan etkileri. Bunlar sinyal KAPILARINI değiştirmez
+# (bir hissenin sinyal olup olmayacağını etkilemez), sadece skoru düzenler.
+DIV_BULL_BONUS = 4.0     # her pozitif uyumsuzluk (RSI ve MACD ayrı ayrı) puan ekler
+DIV_BEAR_PENALTY = 5.0   # her negatif uyumsuzluk puan kırar (bilerek daha ağır)
 
 # Düzeltme (pullback) parametreleri
 PULLBACK_MIN_PCT = 4.0
@@ -684,10 +688,16 @@ def detect_pullback(df, swing_highs, swing_lows, lookback=LOOKBACK_SWING, order=
 # 3) MOMENTUM
 # ============================================================
 
-def rsi_bullish_divergence(close, rsi, peak_idx, order=SWING_ORDER):
+def _bullish_divergence(close, indicator, peak_idx, order=SWING_ORDER):
+    """
+    POZİTİF UYUMSUZLUK: düzeltme sonrasında fiyat DAHA DÜŞÜK dip yaparken
+    göstergenin DAHA YÜKSEK dip yapması. Satış baskısının gücünü yitirdiğine
+    dair klasik ve güçlü bir işaret.
+    `indicator` herhangi bir gösterge olabilir (RSI, MACD çizgisi...).
+    """
     try:
         seg_close = close.loc[peak_idx:]
-        seg_rsi = rsi.loc[peak_idx:]
+        seg_ind = indicator.loc[peak_idx:]
         if len(seg_close) < order * 2 + 3:
             return False
         lows_idx = find_swings(seg_close, order, "min")
@@ -695,10 +705,39 @@ def rsi_bullish_divergence(close, rsi, peak_idx, order=SWING_ORDER):
             return False
         low1, low2 = lows_idx[-2], lows_idx[-1]
         price_lower = seg_close.loc[low2] < seg_close.loc[low1]
-        rsi_higher = seg_rsi.loc[low2] > seg_rsi.loc[low1]
-        return bool(price_lower and rsi_higher)
+        ind_higher = seg_ind.loc[low2] > seg_ind.loc[low1]
+        return bool(price_lower and ind_higher)
     except Exception:
         return False
+
+
+def _bearish_divergence(df, indicator, swing_highs, lookback=LOOKBACK_STRUCTURE):
+    """
+    NEGATİF UYUMSUZLUK: fiyat DAHA YÜKSEK tepe yaparken göstergenin DAHA DÜŞÜK
+    tepe yapması -- yükseliş sürüyor ama arkasındaki güç zayıflıyor demektir.
+    ZigZag'ın ONAYLADIĞI tepeler kullanılır (uydurma tepe üzerinden karar
+    verilmesin diye). Sinyali ENGELLEMEZ, sadece skoru düşürür.
+    """
+    try:
+        if len(swing_highs) < 2:
+            return False
+        cutoff = df.index[0] if len(df) < lookback else df.index[-lookback]
+        tepeler = swing_highs[swing_highs.index >= cutoff]
+        if len(tepeler) < 2:
+            return False
+        t1, t2 = tepeler.index[-2], tepeler.index[-1]
+        if t1 not in indicator.index or t2 not in indicator.index:
+            return False
+        fiyat_daha_yuksek = tepeler.loc[t2] > tepeler.loc[t1]
+        gosterge_daha_dusuk = indicator.loc[t2] < indicator.loc[t1]
+        return bool(fiyat_daha_yuksek and gosterge_daha_dusuk)
+    except Exception:
+        return False
+
+
+def rsi_bullish_divergence(close, rsi, peak_idx, order=SWING_ORDER):
+    """Geriye dönük uyumluluk için korunan sarmalayıcı (davranış birebir aynı)."""
+    return _bullish_divergence(close, rsi, peak_idx, order)
 
 
 def macd_confirm(hist, macd_line, signal_line):
@@ -783,6 +822,17 @@ def evaluate_confluence(df, pullback, swing_highs, swing_lows):
 
     checks["macd"] = macd_confirm(hist, macd_line, signal_line)
 
+    # --- UYUMSUZLUK (DIVERGENCE) ANALİZİ ---
+    # ÖNEMLİ TASARIM KARARI: bunlar `checks` sözlüğüne EKLENMEZ, yani hangi
+    # hissenin sinyal olacağını DEĞİŞTİRMEZ. Sadece skoru düzenler (pozitif
+    # ekler, negatif kırar). Böylece mevcut sinyal kapıları aynen korunur,
+    # ama kalite ayrımı keskinleşir. checks["macd"]'a "veya divergence" diye
+    # eklenseydi kriter GEVŞERDİ ve daha çok zayıf sinyal geçerdi.
+    div_rsi_bull = divergence
+    div_macd_bull = _bullish_divergence(close, macd_line, peak_idx)
+    div_rsi_bear = _bearish_divergence(df, rsi, swing_highs)
+    div_macd_bear = _bearish_divergence(df, macd_line, swing_highs)
+
     structure = hh_hl_structure(df, swing_highs, swing_lows)
     obv5 = obv.tail(5).mean()
     obv20 = obv.iloc[-21:-1].mean() if len(obv) >= 21 else obv5
@@ -802,6 +852,8 @@ def evaluate_confluence(df, pullback, swing_highs, swing_lows):
     return {
         "checks": checks, "count": confluence_count, "rvol": rvol, "rsi": rsi_now,
         "decline_shrank": decline_shrank, "squeeze": squeeze,
+        "div_rsi_bull": div_rsi_bull, "div_macd_bull": div_macd_bull,
+        "div_rsi_bear": div_rsi_bear, "div_macd_bear": div_macd_bear,
     }
 
 # ============================================================
@@ -948,7 +1000,23 @@ def compute_score(trend, pullback, confluence, rs, rr1):
         rs_score * SCORE_WEIGHTS["relative_strength"]
     )
     rr_bonus = min(rr1, 4) * 2.5
-    score = min(100.0, raw * 0.9 + rr_bonus)
+
+    # --- UYUMSUZLUK (DIVERGENCE) PUAN DÜZENLEMESİ ---
+    # Pozitif uyumsuzluk EKLER, negatif uyumsuzluk KIRAR.
+    # Negatif ceza bilerek biraz DAHA AĞIR: "yükseliyor ama gücü tükeniyor"
+    # uyarısı, olumlu bir işaretten daha kritiktir (temkinli taraf ağır basar).
+    div_ayar = 0.0
+    if confluence.get("div_rsi_bull"):
+        div_ayar += DIV_BULL_BONUS
+    if confluence.get("div_macd_bull"):
+        div_ayar += DIV_BULL_BONUS
+    if confluence.get("div_rsi_bear"):
+        div_ayar -= DIV_BEAR_PENALTY
+    if confluence.get("div_macd_bear"):
+        div_ayar -= DIV_BEAR_PENALTY
+
+    score = raw * 0.9 + rr_bonus + div_ayar
+    score = max(0.0, min(100.0, score))   # 0-100 aralığında kalmayı garanti et
     return round(score, 1)
 
 # ============================================================
@@ -1060,6 +1128,25 @@ def build_message(ticker, item):
 
     macd_isaret = "↗️" if c["checks"]["macd"] else "➖"
 
+    # Uyumsuzluk satırı: sadece gerçekten bir uyumsuzluk varsa gösterilir.
+    pozitifler = []
+    if c.get("div_rsi_bull"):
+        pozitifler.append("RSI")
+    if c.get("div_macd_bull"):
+        pozitifler.append("MACD")
+    negatifler = []
+    if c.get("div_rsi_bear"):
+        negatifler.append("RSI")
+    if c.get("div_macd_bear"):
+        negatifler.append("MACD")
+
+    div_parcalari = []
+    if pozitifler:
+        div_parcalari.append(f"✅ Pozitif uyumsuzluk: {', '.join(pozitifler)}")
+    if negatifler:
+        div_parcalari.append(f"⚠️ Negatif uyumsuzluk: {', '.join(negatifler)}")
+    div_satiri = ("🔀 " + "  ·  ".join(div_parcalari) + "\n") if div_parcalari else ""
+
     msg = (
         f"{info['baslik']}\n"
         f"📌 *{ticker}* · {item['close']:.2f} TL · ⭐ {item['score']:.1f}\n\n"
@@ -1074,6 +1161,7 @@ def build_message(ticker, item):
         f"📉 Düzeltme %{pb['drawdown_pct']:.1f}  ({pb['peak_price']:.2f} → {pb['trough_price']:.2f})\n"
         f"📈 Toparlanma +%{pb['recovery_from_low_pct']:.1f}\n"
         f"〽️ RSI {c['rsi']:.1f} · MACD {macd_isaret} · RVOL {c['rvol']:.2f}x\n"
+        f"{div_satiri}"
         f"🌍 BIST'e göre {rs_text} (20g)\n"
         f"{fib_block}"
         f"\n_yatırım tavsiyesi değildir_"
