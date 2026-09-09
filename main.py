@@ -49,6 +49,18 @@ MAX_LAG_BEHIND_MARKET_DAYS = 4   # hisse, XU100'ün son gününden bu kadar geri
 MAX_STALE_DAYS = 12              # mutlak sınır: hiçbir tatil bu kadar sürmez, aşılırsa veri gerçekten donmuş
 STALE_WARN_DAYS = 5              # piyasa verisi bu kadar eskiyse UYAR (ama engelleme -- tatil olabilir)
 MIN_SUCCESS_RATE = 0.6
+MIN_BARS_REQUIRED = 70       # bir hisseyi analiz edebilmek için gereken en az gün sayısı
+
+# --- BIST PAY PİYASASI İŞLEM SAATLERİ (TRT) ---
+# İki ayrı fonksiyonda sabit kodlanmıştı; borsa saatleri değişirse tek yerden
+# güncellenebilsin diye buraya taşındı.
+MARKET_OPEN_HOUR = 10
+MARKET_CLOSE_HOUR = 18
+
+# Stop hesabında kullanılan ATR çarpanı. İŞLEM AÇISINDAN KRİTİK bir parametre
+# olmasına rağmen fonksiyonun içine gömülüydü; ayarlanabilir olması için
+# buraya alındı. Büyütmek = daha geniş stop (daha az erken çıkış, daha çok risk).
+ATR_STOP_MULTIPLIER = 1.5
 # İlk turda alınamayan hisseler için ikinci tur ayarları. Yahoo yoğun istekte
 # sessizce boş veri döndürebiliyor; daha küçük grup + daha uzun bekleme bunu
 # büyük ölçüde telafi eder.
@@ -110,9 +122,9 @@ def market_session_label():
     trt_now = datetime.now(timezone.utc) + timedelta(hours=3)
     minutes = trt_now.hour * 60 + trt_now.minute
 
-    if minutes < 10 * 60:
+    if minutes < MARKET_OPEN_HOUR * 60:
         return "⏰ *Piyasa henüz açılmadı* — bu veriler önceki kapanışa ait, kesinleşmiş."
-    elif minutes < 18 * 60:
+    elif minutes < MARKET_CLOSE_HOUR * 60:
         return ("⚠️ *Piyasa şu an AÇIK* — bugünün mumu henüz tamamlanmadı. "
                 "Özellikle hacim (RVOL) düşük görünebilir, gün sonuna kadar değişebilir.")
     else:
@@ -368,7 +380,7 @@ def batch_download(tickers, batch_size=40, retries=3, sleep_between=1.5, market_
                 if cdf is None:
                     sebepler["bos_veri"] += 1
                     continue
-                if len(cdf) < 70:
+                if len(cdf) < MIN_BARS_REQUIRED:
                     sebepler["kisa_gecmis"] += 1
                     continue
                 ok, reason = data_quality_check(cdf, market_last_date)
@@ -624,7 +636,8 @@ def son_mum_tamamlanmis_mi(df):
     """
     try:
         trt_now = datetime.now(timezone.utc) + timedelta(hours=3)
-        piyasa_acik = 10 * 60 <= (trt_now.hour * 60 + trt_now.minute) < 18 * 60
+        dakika = trt_now.hour * 60 + trt_now.minute
+        piyasa_acik = MARKET_OPEN_HOUR * 60 <= dakika < MARKET_CLOSE_HOUR * 60
         if not piyasa_acik:
             return True
         son = df.index[-1]
@@ -830,7 +843,7 @@ def trend_filter(df, swing_highs, swing_lows):
 # 2) DÜZELTME (PULLBACK)
 # ============================================================
 
-def detect_pullback(df, swing_highs, swing_lows, lookback=LOOKBACK_SWING, order=SWING_ORDER, context_buffer=30):
+def detect_pullback(df, swing_highs, swing_lows, lookback=LOOKBACK_SWING, context_buffer=30):
     high, low, close = df["High"], df["Low"], df["Close"]
     window = lookback + context_buffer
     if len(close) < window:
@@ -1093,10 +1106,10 @@ def calc_levels(df, pullback, resistances):
     cp = float(close.iloc[-1])
     entry_trigger = max(recent_high * 1.001, cp)
 
-    atr_stop = entry_trigger - 1.5 * atr
+    atr_stop = entry_trigger - ATR_STOP_MULTIPLIER * atr
     stop = min(trough * 0.985, atr_stop) if trough > 0 else atr_stop
     if stop >= entry_trigger:
-        stop = entry_trigger - 1.5 * atr
+        stop = entry_trigger - ATR_STOP_MULTIPLIER * atr
 
     risk = entry_trigger - stop
     if risk <= 0:
