@@ -388,10 +388,15 @@ def batch_download(tickers, batch_size=40, retries=3, sleep_between=1.5):
     if eksik and len(eksik) > len(tickers) * 0.10:
         log.warning(f"⚠️ {len(eksik)} hisse alınamadı, ikinci tur deneniyor "
                     f"(daha küçük grup, daha uzun bekleme)...")
-        onceki_sebepler = dict(sebepler)
+        # SAYAÇ SIFIRLAMA: aksi halde aynı hisse hem 1. hem 2. turda sayılır ve
+        # toplam, taranan hisse sayısını AŞAR (ör. 466 hissede "818 kalite reddi"
+        # gibi anlamsız bir sayı çıkıyordu). Özet, hisselerin NEDEN HÂLÂ eksik
+        # olduğunu göstermeli -- yani son denemedeki sebepleri.
+        for k in sebepler:
+            sebepler[k] = 0
+        kalite_detay.clear()
         _tur(eksik, RETRY_BATCH_SIZE, RETRY_SLEEP_SECONDS, "Tekrar")
-        kazanilan = len(tickers) - len(all_data)
-        log.info(f"   İkinci tur sonrası hâlâ eksik: {kazanilan}")
+        log.info(f"   İkinci tur sonrası hâlâ eksik: {len(tickers) - len(all_data)}")
 
     # TEŞHİS ÖZETİ -- neden elendiklerini görünür kılar
     toplam_elenen = len(tickers) - len(all_data)
@@ -404,6 +409,9 @@ def batch_download(tickers, batch_size=40, retries=3, sleep_between=1.5):
             log.warning(f"        └─ {r}: {adet}")
         log.warning(f"    İşleme sırasında istisna                  : {sebepler['istisna']}")
 
+    # Sebepleri dışarı da veriyoruz ki Telegram uyarısı "neden" olduğunu
+    # söyleyebilsin. Geriye dönük uyumluluk için sözlüğe iliştiriliyor.
+    batch_download.son_sebepler = {"sayilar": dict(sebepler), "kalite": dict(kalite_detay)}
     return all_data
 
 
@@ -1470,7 +1478,13 @@ def check_open_positions(state, all_data):
 # ============================================================
 
 def build_summary_message(stage_counts, total_scanned, total_universe, open_positions_count, regime_ok, top3, watch_list=None):
-    regime_text = "Güçlü ✅" if regime_ok else "Zayıf ⚠️"
+    # regime_ok None ise XU100 verisi hiç alınamamış demektir -- "Güçlü" yazmak
+    # yanıltıcı olurdu, çünkü gerçek durum "bilmiyoruz". Filtre de bu durumda
+    # zaten devre dışı kalıyor.
+    if regime_ok is None:
+        regime_text = "Bilinmiyor ⚪ (XU100 verisi yok)"
+    else:
+        regime_text = "Güçlü ✅" if regime_ok else "Zayıf ⚠️"
     # top3 artık (ticker, skor, aşama) üçlüsü. Aşama emojisi gösteriliyor ki
     # "en güçlü listesinde başta ama neden mesaj gelmedi?" sorusu oluşmasın:
     # 🔵 (İzleme) ayrı mesaj almaz, sadece bu özette listelenir.
@@ -1598,7 +1612,15 @@ def main():
     xu100_df = get_market_data()
     xu100_close = xu100_df["Close"] if xu100_df is not None else None
     regime_ok = market_regime_ok(xu100_df)
-    log.info(f"🌍 Piyasa rejimi (XU100 > SMA50): {'UYGUN ✅' if regime_ok else 'ZAYIF ⚠️'}")
+    # DÜZELTME: XU100 verisi HİÇ alınamadığında market_regime_ok True dönüyor
+    # (filtreyi devre dışı bırakmak için, bilinçli bir tasarım). Ama log
+    # "UYGUN ✅" yazıyordu -- sanki piyasa güçlüymüş gibi. Oysa gerçek durum
+    # "bilmiyoruz". Artık ayırt ediliyor.
+    if xu100_df is None:
+        log.warning("🌍 Piyasa rejimi: XU100 VERİSİ ALINAMADI — rejim filtresi "
+                    "devre dışı, BIST'e göre görece güç de hesaplanamayacak.")
+    else:
+        log.info(f"🌍 Piyasa rejimi (XU100 > SMA50): {'UYGUN ✅' if regime_ok else 'ZAYIF ⚠️'}")
 
     log.info("📥 Veri toplu indiriliyor...")
     all_data = batch_download(BIST_TUM_LISTESI)
@@ -1606,10 +1628,31 @@ def main():
     log.info(f"✅ {len(all_data)}/{len(BIST_TUM_LISTESI)} hisse için veri alındı ({success_rate:.0%}).")
 
     if success_rate < MIN_SUCCESS_RATE:
+        # UYARIYA SEBEP EKLENDİ: eskiden sadece "veri alınamadı" diyordu ve
+        # nedenini anlamak için GitHub loglarını açmak gerekiyordu. Artık
+        # en baskın eleme sebebi doğrudan mesajda yazıyor.
+        sebep_metni = ""
+        try:
+            son = getattr(batch_download, "son_sebepler", None)
+            if son:
+                sayilar, kalite = son["sayilar"], son["kalite"]
+                if kalite:
+                    en_cok = max(kalite.items(), key=lambda x: x[1])
+                    sebep_metni = f"\n\n📋 *Baskın sebep:* {en_cok[0]} ({en_cok[1]} hisse)"
+                    if "eski" in en_cok[0].lower():
+                        sebep_metni += ("\n_Yahoo'nun BIST verisi güncellenmemiş görünüyor. "
+                                        "Bu bizim kaynaklı değil; veri tazelenince kendiliğinden düzelir._")
+                elif sayilar.get("bos_veri", 0) > 0:
+                    sebep_metni = (f"\n\n📋 *Baskın sebep:* Yahoo boş veri döndürdü "
+                                   f"({sayilar['bos_veri']} hisse) — geçici erişim sorunu olabilir.")
+        except Exception:
+            pass
+
         send_telegram(
             "⚠️ *TARAMA ŞÜPHELİ*\n\n"
             f"Sadece {len(all_data)}/{len(BIST_TUM_LISTESI)} hisse için veri alınabildi ({success_rate:.0%}).\n"
             "Bu çalıştırmadaki sinyaller güvenilir olmayabilir."
+            f"{sebep_metni}"
         )
         log.warning("Veri başarı oranı düşük.")
 
@@ -1817,7 +1860,10 @@ def main():
     # results zaten skora göre sıralı geldiği için liste de sıralı olur.
     watch_list = [(item["ticker"], item["score"]) for item in results if item["stage"] == "WATCH"]
 
-    summary_msg = build_summary_message(stage_counts_all, len(all_data), len(BIST_TUM_LISTESI), open_positions_count, regime_ok, top3, watch_list)
+    # XU100 alınamadıysa özet mesajında "Güçlü" değil "Bilinmiyor" yazsın diye
+    # None geçiyoruz (regime_ok'un kendisi filtre için True kalmaya devam eder).
+    regime_gosterim = regime_ok if xu100_df is not None else None
+    summary_msg = build_summary_message(stage_counts_all, len(all_data), len(BIST_TUM_LISTESI), open_positions_count, regime_gosterim, top3, watch_list)
     send_telegram(summary_msg)
 
     maybe_send_performance_summary(state)
