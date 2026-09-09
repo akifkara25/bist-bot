@@ -611,6 +611,57 @@ def compute_zigzag(df, period=ZIGZAG_PERIOD):
     return swing_highs, swing_lows
 
 
+def son_mum_tamamlanmis_mi(df):
+    """
+    Piyasa AÇIKKEN çekilen veride son mum YARIMDIR: fiyat güncel ama hacim
+    günün sadece o ana kadarki kısmıdır. Gerçek veride ölçüldü: saat 10:29'da
+    ortalama RVOL 0.07, 11:00'de 0.31, kapanış sonrası 1.54 -- yani sabah
+    taramalarında hacim kriteri MATEMATİKSEL OLARAK sağlanamıyordu.
+
+    Bu fonksiyon, son mumun tamamlanıp tamamlanmadığını söyler. Tamamlanmamışsa
+    HACİM ölçümleri bir gün geriden (son tam günden) yapılır; fiyat/trend
+    hesapları güncel mumu kullanmaya devam eder.
+    """
+    try:
+        trt_now = datetime.now(timezone.utc) + timedelta(hours=3)
+        piyasa_acik = 10 * 60 <= (trt_now.hour * 60 + trt_now.minute) < 18 * 60
+        if not piyasa_acik:
+            return True
+        son = df.index[-1]
+        son_tarih = (son.to_pydatetime() if hasattr(son, "to_pydatetime") else son)
+        return son_tarih.date() != trt_now.date()
+    except Exception:
+        return True
+
+
+def calc_rvol(volume, son_mum_tam=True):
+    """
+    RVOL = son günün hacmi / önceki 20 günün ortalaması.
+    Son mum yarımsa bir gün geriden hesaplanır (yanıltıcı düşük değer üretmesin).
+    """
+    try:
+        if son_mum_tam:
+            if len(volume) < 22:
+                return 1.0
+            avg20 = volume.iloc[-21:-1].mean()
+            son = volume.iloc[-1]
+        else:
+            if len(volume) < 23:
+                return 1.0
+            avg20 = volume.iloc[-22:-2].mean()   # bir gün geriden
+            son = volume.iloc[-2]
+        return float(son / avg20) if avg20 > 0 else 1.0
+    except Exception:
+        return 1.0
+
+
+    high, low, close, volume = df["High"], df["Low"], df["Close"], df["Volume"]
+    mfm = ((close - low) - (high - close)) / (high - low).replace(0, np.nan)
+    mfv = mfm * volume
+    cmf = mfv.rolling(period).sum() / volume.rolling(period).sum()
+    return cmf.fillna(0)
+
+
 def calc_cmf(df, period=20):
     high, low, close, volume = df["High"], df["Low"], df["Close"], df["Volume"]
     mfm = ((close - low) - (high - close)) / (high - low).replace(0, np.nan)
@@ -958,8 +1009,12 @@ def evaluate_confluence(df, pullback, swing_highs, swing_lows):
     checks = {}
 
     decline_shrank, recovery_rising = volume_profile(volume, peak_idx, trough_idx)
-    avg20 = volume.iloc[-21:-1].mean()
-    rvol = float(volume.iloc[-1] / avg20) if avg20 > 0 else 1.0
+    # RVOL: piyasa açıkken son mum YARIM olduğu için hacim ölçümü bir gün
+    # geriden yapılır -- aksi halde sabah taramalarında RVOL yapay olarak
+    # düşük çıkıyor ve hacim kriteri hiç sağlanamıyordu (gerçek veride
+    # ölçüldü: 10:29'da ort. 0.07, kapanış sonrası 1.54).
+    son_mum_tam = son_mum_tamamlanmis_mi(df)
+    rvol = calc_rvol(volume, son_mum_tam)
     cmf_positive = float(cmf.iloc[-1]) > 0
     checks["hacim"] = bool(decline_shrank and (recovery_rising or rvol >= 1.15 or cmf_positive))
 
