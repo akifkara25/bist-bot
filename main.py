@@ -38,7 +38,16 @@ MAX_WATCH_IN_SUMMARY = 15    # Günlük özette en fazla kaç izleme hissesi ism
 POSITION_TIMEOUT_DAYS = 40   # Bir takip ne hedefe ne stop'a ulaşmadan bu kadar gün geçerse zaman aşımıyla kapatılır
 
 # --- Veri kalitesi eşikleri ---
-MAX_STALE_DAYS = 5
+# TATİL SORUNU (test edildi): Eskiden tek bir "5 takvim günü" eşiği vardı ve
+# Kurban/Ramazan Bayramı sonrası (6-9 gün kapalı) bot TÜM hisseleri "veri çok
+# eski" diye eliyordu. Artık iki ayrı ölçüt var:
+#   1) Hisse, PİYASANIN kendi son işlem gününden (XU100) ne kadar geri kalmış?
+#      Bu ölçüt tatilden etkilenmez -- tatilde XU100 da işlem görmez.
+#   2) Piyasanın kendisi ne kadar eski? Bu, Yahoo feed'inin donduğunu yakalar.
+#      Eşik, en uzun bayram tatilini bile aşacak şekilde geniş tutuldu.
+MAX_LAG_BEHIND_MARKET_DAYS = 4   # hisse, XU100'ün son gününden bu kadar geri kalırsa elenir
+MAX_STALE_DAYS = 12              # mutlak sınır: hiçbir tatil bu kadar sürmez, aşılırsa veri gerçekten donmuş
+STALE_WARN_DAYS = 5              # piyasa verisi bu kadar eskiyse UYAR (ama engelleme -- tatil olabilir)
 MIN_SUCCESS_RATE = 0.6
 # İlk turda alınamayan hisseler için ikinci tur ayarları. Yahoo yoğun istekte
 # sessizce boş veri döndürebiliyor; daha küçük grup + daha uzun bekleme bunu
@@ -303,19 +312,31 @@ def clean_df(df):
         return None
 
 
-def data_quality_check(df):
+def data_quality_check(df, market_last_date=None):
+    """
+    market_last_date: XU100'ün son işlem günü (varsa). Verilirse, hissenin
+    tazelik kontrolü TAKVİME değil PİYASAYA göre yapılır -- bayram tatillerinde
+    yanlış eleme yapmamak için. Verilmezse sadece mutlak sınır uygulanır.
+    """
     if df is None or df.empty:
         return False, "boş veri"
     last_date = df.index[-1]
     if hasattr(last_date, "to_pydatetime"):
         last_date = last_date.to_pydatetime()
-    # NOT: last_date tz-aware gelirse (.replace(tzinfo=None)) saat dilimi
-    # DÖNÜŞÜMÜ yapmadan direkt siliyoruz -- bu birkaç saatlik bir yaklaşıklık
-    # yaratabilir. Gerçek yfinance çıktısıyla test edilemediği için (bu ortamda
-    # ağ erişimi yok) bilerek DOKUNULMADI: MAX_STALE_DAYS=5 günlük tampon payı,
-    # birkaç saatlik bu farkı zaten fazlasıyla yutuyor, pratik bir etkisi yok.
-    if (datetime.now() - last_date.replace(tzinfo=None)) > timedelta(days=MAX_STALE_DAYS):
+    last_date = last_date.replace(tzinfo=None)
+
+    # 1) Hisse, piyasanın son işlem gününden ne kadar geri kalmış?
+    #    (tatilden etkilenmez, çünkü tatilde XU100 da işlem görmez)
+    if market_last_date is not None:
+        gecikme = (market_last_date - last_date).days
+        if gecikme > MAX_LAG_BEHIND_MARKET_DAYS:
+            return False, f"piyasadan {gecikme} gün geri ({last_date.date()})"
+
+    # 2) Mutlak sınır: en uzun bayram tatilini bile aşan bir eskilik, gerçek
+    #    bir veri donması demektir.
+    if (datetime.now() - last_date) > timedelta(days=MAX_STALE_DAYS):
         return False, f"veri çok eski ({last_date.date()})"
+
     daily_change = df["Close"].pct_change().abs()
     if (daily_change > MAX_DAILY_JUMP_PCT / 100).tail(LOOKBACK_SWING).any():
         return False, "şüpheli tek günlük sıçrama"
@@ -324,7 +345,7 @@ def data_quality_check(df):
     return True, "ok"
 
 
-def batch_download(tickers, batch_size=40, retries=3, sleep_between=1.5):
+def batch_download(tickers, batch_size=40, retries=3, sleep_between=1.5, market_last_date=None):
     """
     TEŞHİS EKLENDİ: Eskiden elenen hisseler SESSİZCE atlanıyordu (log.debug
     seviyesinde, yani GitHub Actions logunda hiç görünmüyordu). Bir taramada
@@ -350,7 +371,7 @@ def batch_download(tickers, batch_size=40, retries=3, sleep_between=1.5):
                 if len(cdf) < 70:
                     sebepler["kisa_gecmis"] += 1
                     continue
-                ok, reason = data_quality_check(cdf)
+                ok, reason = data_quality_check(cdf, market_last_date)
                 if not ok:
                     sebepler["kalite_reddi"] += 1
                     kalite_detay[reason] = kalite_detay.get(reason, 0) + 1
@@ -1623,7 +1644,19 @@ def main():
         log.info(f"🌍 Piyasa rejimi (XU100 > SMA50): {'UYGUN ✅' if regime_ok else 'ZAYIF ⚠️'}")
 
     log.info("📥 Veri toplu indiriliyor...")
-    all_data = batch_download(BIST_TUM_LISTESI)
+    # Piyasanın son işlem günü referansı: tazelik kontrolü buna göre yapılır
+    # (bayram tatillerinde takvim günü saymak yanlış eleme yaratıyordu).
+    market_last_date = None
+    if xu100_df is not None and len(xu100_df) > 0:
+        _md = xu100_df.index[-1]
+        market_last_date = (_md.to_pydatetime() if hasattr(_md, "to_pydatetime") else _md).replace(tzinfo=None)
+        gecen = (datetime.now() - market_last_date).days
+        if gecen > STALE_WARN_DAYS:
+            log.warning(f"⚠️ Piyasa verisi {gecen} gündür güncellenmemiş "
+                        f"(son işlem günü: {market_last_date.date()}). "
+                        f"Tatil ise normal; değilse Yahoo feed'i donmuş olabilir.")
+
+    all_data = batch_download(BIST_TUM_LISTESI, market_last_date=market_last_date)
     success_rate = len(all_data) / len(BIST_TUM_LISTESI) if BIST_TUM_LISTESI else 0
     log.info(f"✅ {len(all_data)}/{len(BIST_TUM_LISTESI)} hisse için veri alındı ({success_rate:.0%}).")
 
