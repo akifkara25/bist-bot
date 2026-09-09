@@ -40,6 +40,11 @@ POSITION_TIMEOUT_DAYS = 40   # Bir takip ne hedefe ne stop'a ulaşmadan bu kadar
 # --- Veri kalitesi eşikleri ---
 MAX_STALE_DAYS = 5
 MIN_SUCCESS_RATE = 0.6
+# İlk turda alınamayan hisseler için ikinci tur ayarları. Yahoo yoğun istekte
+# sessizce boş veri döndürebiliyor; daha küçük grup + daha uzun bekleme bunu
+# büyük ölçüde telafi eder.
+RETRY_BATCH_SIZE = 15
+RETRY_SLEEP_SECONDS = 4.0
 MAX_DAILY_JUMP_PCT = 60.0
 
 # --- Confluence eşikleri (4 ana kategori üzerinden) ---
@@ -320,38 +325,84 @@ def data_quality_check(df):
 
 
 def batch_download(tickers, batch_size=40, retries=3, sleep_between=1.5):
-    all_data = {}
-    batches = [tickers[i:i + batch_size] for i in range(0, len(tickers), batch_size)]
+    """
+    TEŞHİS EKLENDİ: Eskiden elenen hisseler SESSİZCE atlanıyordu (log.debug
+    seviyesinde, yani GitHub Actions logunda hiç görünmüyordu). Bir taramada
+    466 hisseden sadece 22'si alınabildiğinde neden olduğunu anlamak imkansızdı.
+    Artık her eleme sebebi sayılıyor ve tarama sonunda özet olarak yazılıyor.
 
-    for bi, batch in enumerate(batches, start=1):
-        log.info(f"  Grup {bi}/{len(batches)} indiriliyor ({len(batch)} hisse)...")
-        attempt = 0
-        while attempt < retries:
+    İKİNCİ TUR: İlk turda alınamayan hisseler, daha küçük gruplar ve daha uzun
+    beklemeyle yeniden denenir. Yahoo yoğunlukta sessizce boş veri döndürebiliyor;
+    ikinci tur bunu büyük ölçüde telafi eder.
+    """
+    all_data = {}
+    sebepler = {"bos_veri": 0, "kisa_gecmis": 0, "kalite_reddi": 0, "istisna": 0}
+    kalite_detay = {}
+
+    def _grubu_isle(batch, data):
+        for t in batch:
             try:
-                data = yf.download(
-                    tickers=batch, period="1y", interval="1d",
-                    group_by="ticker", progress=False, auto_adjust=True,
-                    threads=True
-                )
-                for t in batch:
-                    try:
-                        sub = data[t] if len(batch) > 1 else data
-                        cdf = clean_df(sub)
-                        if cdf is None or len(cdf) < 70:
-                            continue
-                        ok, reason = data_quality_check(cdf)
-                        if not ok:
-                            log.debug(f"{t}: veri kalitesi reddi ({reason})")
-                            continue
-                        all_data[t] = cdf
-                    except Exception:
-                        continue
-                break
-            except Exception as e:
-                attempt += 1
-                log.warning(f"Grup hata (deneme {attempt}/{retries}): {e}")
-                time.sleep(sleep_between * attempt)
-        time.sleep(sleep_between)
+                sub = data[t] if len(batch) > 1 else data
+                cdf = clean_df(sub)
+                if cdf is None:
+                    sebepler["bos_veri"] += 1
+                    continue
+                if len(cdf) < 70:
+                    sebepler["kisa_gecmis"] += 1
+                    continue
+                ok, reason = data_quality_check(cdf)
+                if not ok:
+                    sebepler["kalite_reddi"] += 1
+                    kalite_detay[reason] = kalite_detay.get(reason, 0) + 1
+                    continue
+                all_data[t] = cdf
+            except Exception:
+                sebepler["istisna"] += 1
+                continue
+
+    def _tur(liste, bsize, bekleme, etiket):
+        gruplar = [liste[i:i + bsize] for i in range(0, len(liste), bsize)]
+        for bi, batch in enumerate(gruplar, start=1):
+            log.info(f"  {etiket} {bi}/{len(gruplar)} indiriliyor ({len(batch)} hisse)...")
+            attempt = 0
+            while attempt < retries:
+                try:
+                    data = yf.download(
+                        tickers=batch, period="1y", interval="1d",
+                        group_by="ticker", progress=False, auto_adjust=True,
+                        threads=True
+                    )
+                    _grubu_isle(batch, data)
+                    break
+                except Exception as e:
+                    attempt += 1
+                    log.warning(f"Grup hata (deneme {attempt}/{retries}): {e}")
+                    time.sleep(bekleme * attempt)
+            time.sleep(bekleme)
+
+    # 1. TUR
+    _tur(tickers, batch_size, sleep_between, "Grup")
+
+    # 2. TUR: eksik kalanları daha yavaş ve küçük gruplarla yeniden dene
+    eksik = [t for t in tickers if t not in all_data]
+    if eksik and len(eksik) > len(tickers) * 0.10:
+        log.warning(f"⚠️ {len(eksik)} hisse alınamadı, ikinci tur deneniyor "
+                    f"(daha küçük grup, daha uzun bekleme)...")
+        onceki_sebepler = dict(sebepler)
+        _tur(eksik, RETRY_BATCH_SIZE, RETRY_SLEEP_SECONDS, "Tekrar")
+        kazanilan = len(tickers) - len(all_data)
+        log.info(f"   İkinci tur sonrası hâlâ eksik: {kazanilan}")
+
+    # TEŞHİS ÖZETİ -- neden elendiklerini görünür kılar
+    toplam_elenen = len(tickers) - len(all_data)
+    if toplam_elenen > 0:
+        log.warning(f"📋 Eleme sebepleri (toplam {toplam_elenen} hisse alınamadı):")
+        log.warning(f"    Boş/geçersiz veri (Yahoo veri döndürmedi) : {sebepler['bos_veri']}")
+        log.warning(f"    70 günden az geçmiş                       : {sebepler['kisa_gecmis']}")
+        log.warning(f"    Kalite kontrolünden geçemedi              : {sebepler['kalite_reddi']}")
+        for r, adet in sorted(kalite_detay.items(), key=lambda x: -x[1]):
+            log.warning(f"        └─ {r}: {adet}")
+        log.warning(f"    İşleme sırasında istisna                  : {sebepler['istisna']}")
 
     return all_data
 
@@ -1530,6 +1581,15 @@ def maybe_send_performance_summary(state):
 def main():
     log.info("============================================")
     log.info("🧠 BIST TREND+PULLBACK+CONFLUENCE ENGINE v3")
+    # SÜRÜM KAYDI: requirements.txt "yfinance>=0.2.60" dediği için her
+    # çalıştırmada EN SON sürüm kurulur. yfinance'te bozucu değişiklikler
+    # sık olur (Yahoo arayüzü değiştikçe kütüphane de değişiyor). Bir gün
+    # veri gelmemeye başlarsa, "hangi sürümle çalışıyordu" sorusunu
+    # cevaplayabilmek için sürümleri loga yazıyoruz.
+    try:
+        log.info(f"📦 yfinance {getattr(yf, '__version__', '?')} | pandas {pd.__version__} | numpy {np.__version__}")
+    except Exception:
+        pass
     log.info("============================================")
 
     state = load_state()
