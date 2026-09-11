@@ -324,31 +324,10 @@ def clean_df(df):
         return None
 
 
-def data_quality_check(df, market_last_date=None):
-    """
-    market_last_date: XU100'ün son işlem günü (varsa). Verilirse, hissenin
-    tazelik kontrolü TAKVİME değil PİYASAYA göre yapılır -- bayram tatillerinde
-    yanlış eleme yapmamak için. Verilmezse sadece mutlak sınır uygulanır.
-    """
+def veri_kalitesi_temel(df):
+    """Tazelikten BAĞIMSIZ kontroller: boşluk, bozuk fiyat, absürt sıçrama."""
     if df is None or df.empty:
         return False, "boş veri"
-    last_date = df.index[-1]
-    if hasattr(last_date, "to_pydatetime"):
-        last_date = last_date.to_pydatetime()
-    last_date = last_date.replace(tzinfo=None)
-
-    # 1) Hisse, piyasanın son işlem gününden ne kadar geri kalmış?
-    #    (tatilden etkilenmez, çünkü tatilde XU100 da işlem görmez)
-    if market_last_date is not None:
-        gecikme = (market_last_date - last_date).days
-        if gecikme > MAX_LAG_BEHIND_MARKET_DAYS:
-            return False, f"piyasadan {gecikme} gün geri ({last_date.date()})"
-
-    # 2) Mutlak sınır: en uzun bayram tatilini bile aşan bir eskilik, gerçek
-    #    bir veri donması demektir.
-    if (datetime.now() - last_date) > timedelta(days=MAX_STALE_DAYS):
-        return False, f"veri çok eski ({last_date.date()})"
-
     daily_change = df["Close"].pct_change().abs()
     if (daily_change > MAX_DAILY_JUMP_PCT / 100).tail(LOOKBACK_SWING).any():
         return False, "şüpheli tek günlük sıçrama"
@@ -357,7 +336,56 @@ def data_quality_check(df, market_last_date=None):
     return True, "ok"
 
 
-def batch_download(tickers, batch_size=40, retries=3, sleep_between=1.5, market_last_date=None):
+def _son_tarih(df):
+    son = df.index[-1]
+    son = son.to_pydatetime() if hasattr(son, "to_pydatetime") else son
+    return son.replace(tzinfo=None)
+
+
+def veri_tazelik_kontrol(df, market_last_date=None):
+    """
+    Hissenin verisi güncel mi?
+
+    market_last_date: PİYASANIN son işlem günü. Bu, indirilen TÜM hisselerin
+    en güncel tarihinden hesaplanır -- XU100'den DEĞİL. Sebebi önemli:
+
+      * BAYRAM TATİLİNDE piyasa kapalıdır, HİÇBİR hisse güncel olmaz, hepsi
+        aynı tarihte kalır -> gecikme 0 -> hepsi kabul edilir (doğru).
+      * FEED DONMASINDA piyasa açıktır ve BAZI hisseler güncel veri döndürür
+        (9 Eylül'de 466 hisseden 22'si güncelti). En güncel tarih bunlardan
+        gelir, donmuş olanlar ona göre geri kalmış görünür -> elenir (doğru).
+
+    Böylece takvim bilgisine ihtiyaç duymadan iki durum ayırt edilebiliyor.
+    """
+    if df is None or df.empty:
+        return False, "boş veri"
+    last_date = _son_tarih(df)
+
+    if market_last_date is not None:
+        gecikme = (market_last_date - last_date).days
+        if gecikme > MAX_LAG_BEHIND_MARKET_DAYS:
+            return False, f"piyasadan {gecikme} gün geri ({last_date.date()})"
+
+    # Mutlak sınır: en uzun bayram tatilini bile aşan eskilik = gerçek donma
+    if (datetime.now() - last_date) > timedelta(days=MAX_STALE_DAYS):
+        return False, f"veri çok eski ({last_date.date()})"
+    return True, "ok"
+
+
+def data_quality_check(df, market_last_date=None):
+    """
+    Temel + tazelik kontrollerinin birleşimi.
+    NOT: Üretim akışı artık ikisini AYRI çağırıyor (tazelik ancak tüm veri
+    indirildikten sonra hesaplanabildiği için). Bu fonksiyon testler ve
+    dışarıdan tek seferlik kontroller için korunuyor.
+    """
+    ok, sebep = veri_kalitesi_temel(df)
+    if not ok:
+        return ok, sebep
+    return veri_tazelik_kontrol(df, market_last_date)
+
+
+def batch_download(tickers, batch_size=40, retries=3, sleep_between=1.5):
     """
     TEŞHİS EKLENDİ: Eskiden elenen hisseler SESSİZCE atlanıyordu (log.debug
     seviyesinde, yani GitHub Actions logunda hiç görünmüyordu). Bir taramada
@@ -383,7 +411,11 @@ def batch_download(tickers, batch_size=40, retries=3, sleep_between=1.5, market_
                 if len(cdf) < MIN_BARS_REQUIRED:
                     sebepler["kisa_gecmis"] += 1
                     continue
-                ok, reason = data_quality_check(cdf, market_last_date)
+                # TAZELİK burada kontrol EDİLMEZ -- piyasa referansı ancak tüm
+                # hisseler indirildikten sonra hesaplanabilir (bkz. aşağıdaki
+                # tazelik filtresi). Burada sadece tazelikten bağımsız
+                # bozukluklar elenir.
+                ok, reason = veri_kalitesi_temel(cdf)
                 if not ok:
                     sebepler["kalite_reddi"] += 1
                     kalite_detay[reason] = kalite_detay.get(reason, 0) + 1
@@ -430,6 +462,27 @@ def batch_download(tickers, batch_size=40, retries=3, sleep_between=1.5, market_
         kalite_detay.clear()
         _tur(eksik, RETRY_BATCH_SIZE, RETRY_SLEEP_SECONDS, "Tekrar")
         log.info(f"   İkinci tur sonrası hâlâ eksik: {len(tickers) - len(all_data)}")
+
+    # --- TAZELİK FİLTRESİ (tüm indirme bittikten SONRA) ---
+    # Piyasa referansı = indirilen hisselerin EN GÜNCEL tarihi.
+    # Bayramda hepsi aynı tarihte olur (gecikme 0, hepsi geçer);
+    # feed donmasında güncel kalan birkaç hisse referansı yukarı çeker ve
+    # donmuş olanlar elenir. Detaylı açıklama: veri_tazelik_kontrol()
+    if all_data:
+        piyasa_ref = max(_son_tarih(d) for d in all_data.values())
+        gecen = (datetime.now() - piyasa_ref).days
+        log.info(f"📅 Piyasanın en güncel verisi: {piyasa_ref.date()} ({gecen} gün önce)")
+        bayat = []
+        for t, d in list(all_data.items()):
+            ok, reason = veri_tazelik_kontrol(d, piyasa_ref)
+            if not ok:
+                bayat.append((t, reason))
+                sebepler["kalite_reddi"] += 1
+                kalite_detay[reason] = kalite_detay.get(reason, 0) + 1
+                del all_data[t]
+        if bayat:
+            log.warning(f"🕰️ {len(bayat)} hisse BAYAT veri nedeniyle elendi "
+                        f"(piyasa referansı: {piyasa_ref.date()})")
 
     # TEŞHİS ÖZETİ -- neden elendiklerini görünür kılar
     toplam_elenen = len(tickers) - len(all_data)
@@ -1712,19 +1765,18 @@ def main():
         log.info(f"🌍 Piyasa rejimi (XU100 > SMA50): {'UYGUN ✅' if regime_ok else 'ZAYIF ⚠️'}")
 
     log.info("📥 Veri toplu indiriliyor...")
-    # Piyasanın son işlem günü referansı: tazelik kontrolü buna göre yapılır
-    # (bayram tatillerinde takvim günü saymak yanlış eleme yaratıyordu).
-    market_last_date = None
+    # NOT: Tazelik referansı XU100'DEN DEĞİL, indirilen tüm hisselerin en
+    # güncel tarihinden hesaplanıyor (bkz. batch_download içindeki tazelik
+    # filtresi). Sebebi: XU100 da aynı feed'den geldiği için o da donabilir;
+    # oysa hisselerin en günceli, piyasanın gerçekten işlem görüp görmediğini
+    # daha güvenilir gösteriyor.
     if xu100_df is not None and len(xu100_df) > 0:
-        _md = xu100_df.index[-1]
-        market_last_date = (_md.to_pydatetime() if hasattr(_md, "to_pydatetime") else _md).replace(tzinfo=None)
-        gecen = (datetime.now() - market_last_date).days
-        if gecen > STALE_WARN_DAYS:
-            log.warning(f"⚠️ Piyasa verisi {gecen} gündür güncellenmemiş "
-                        f"(son işlem günü: {market_last_date.date()}). "
-                        f"Tatil ise normal; değilse Yahoo feed'i donmuş olabilir.")
+        _gecen = (datetime.now() - _son_tarih(xu100_df)).days
+        if _gecen > STALE_WARN_DAYS:
+            log.warning(f"⚠️ XU100 verisi {_gecen} gündür güncellenmemiş "
+                        f"(son: {_son_tarih(xu100_df).date()}). Tatil ise normal.")
 
-    all_data = batch_download(BIST_TUM_LISTESI, market_last_date=market_last_date)
+    all_data = batch_download(BIST_TUM_LISTESI)
     success_rate = len(all_data) / len(BIST_TUM_LISTESI) if BIST_TUM_LISTESI else 0
     log.info(f"✅ {len(all_data)}/{len(BIST_TUM_LISTESI)} hisse için veri alındı ({success_rate:.0%}).")
 
