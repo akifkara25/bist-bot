@@ -61,6 +61,11 @@ MARKET_CLOSE_HOUR = 18
 # olmasına rağmen fonksiyonun içine gömülüydü; ayarlanabilir olması için
 # buraya alındı. Büyütmek = daha geniş stop (daha az erken çıkış, daha çok risk).
 ATR_STOP_MULTIPLIER = 1.5
+# Stop, girişten en az bu kadar ATR uzakta olmalı. Daha yakın bir destek,
+# günlük normal dalgalanmanın içinde kalır ve gürültüyle tetiklenir.
+MIN_STOP_ATR_DISTANCE = 1.0
+# Destek/direnç seviyesinin hemen altına/üstüne bırakılan pay (%1.5)
+LEVEL_BUFFER = 0.985
 # İlk turda alınamayan hisseler için ikinci tur ayarları. Yahoo yoğun istekte
 # sessizce boş veri döndürebiliyor; daha küçük grup + daha uzun bekleme bunu
 # büyük ölçüde telafi eder.
@@ -1137,15 +1142,38 @@ def find_resistances(df, swing_highs, close, lookback=LOOKBACK_STRUCTURE):
     sh_vals = swing_highs[swing_highs.index >= cutoff].sort_values()
     cp = float(close.iloc[-1])
     above = sh_vals[sh_vals > cp * 1.005]
-    nearest = float(above.iloc[0]) if len(above) >= 1 else None
-    second = float(above.iloc[1]) if len(above) >= 2 else None
-    return nearest, second
+    # DÜZELTME: eskiden sadece en yakın 2 direnç döndürülüyordu. Düzeltme
+    # sırasında yolda ara tepeler oluşunca (ör. EBEBK: 92.15'ten 77'ye inerken
+    # 86.5 ve 88.9'da ara tepeler) bu ikisi girişe "çok yakın" diye elenir ve
+    # asıl anlamlı direnç (92.15) HİÇ kontrol edilmeden formüle düşülürdü.
+    # Artık fiyatın üzerindeki TÜM dirençler, yakından uzağa sıralı döner.
+    return [float(v) for v in above.values]
+
+def find_supports(df, swing_lows, close, lookback=LOOKBACK_STRUCTURE):
+    """
+    find_resistances'ın simetriği: fiyatın ALTINDAKİ gerçek destek seviyeleri
+    (ZigZag'ın onayladığı dipler), YAKINDAN UZAĞA sıralı.
+
+    Neden gerekli: eskiden stop, düzeltmenin dibi ile ATR mesafesinin daha
+    UZAK olanına konuyordu. Fiyat dipten çok uzaklaşmışsa bu, orantısız büyük
+    bir risk üretiyordu (gerçek örnek: NETAS'ta stop girişin %43.8 altındaydı).
+    Oysa aradaki yükselen dipler de geçerli birer geçersizleşme noktasıdır.
+    """
+    if len(df) < lookback:
+        cutoff = df.index[0]
+    else:
+        cutoff = df.index[-lookback]
+    sl_vals = swing_lows[swing_lows.index >= cutoff].sort_values(ascending=False)
+    cp = float(close.iloc[-1])
+    below = sl_vals[sl_vals < cp * 0.995]
+    return [float(v) for v in below.values]
+
 
 # ============================================================
 # 8) GİRİŞ / STOP / HEDEF SEVİYELERİ
 # ============================================================
 
-def calc_levels(df, pullback, resistances):
+def calc_levels(df, pullback, resistances, supports=None):
     close, high = df["Close"], df["High"]
     atr = float(calc_atr(df).iloc[-1])
     trough = pullback["trough_price"]
@@ -1159,8 +1187,29 @@ def calc_levels(df, pullback, resistances):
     cp = float(close.iloc[-1])
     entry_trigger = max(recent_high * 1.001, cp)
 
+    # STOP SEÇİMİ (hedef seçiminin simetriği):
+    # Girişin altındaki GERÇEK destekleri yakından uzağa tara, gürültü
+    # mesafesini (MIN_STOP_ATR_DISTANCE x ATR) aşan İLK desteğin hemen altına
+    # stop koy. Eskiden düzeltmenin dibi ile ATR'nin daha UZAK olanı alınıyordu;
+    # fiyat dipten uzaklaşmışsa bu orantısız risk üretiyordu (NETAS: %43.8).
     atr_stop = entry_trigger - ATR_STOP_MULTIPLIER * atr
-    stop = min(trough * 0.985, atr_stop) if trough > 0 else atr_stop
+    adaylar = sorted([d for d in (supports or []) if d], reverse=True)
+    if trough > 0:
+        adaylar.append(trough)
+        adaylar = sorted(set(adaylar), reverse=True)   # yakından uzağa
+
+    stop = None
+    for seviye in adaylar:
+        aday_stop = seviye * LEVEL_BUFFER
+        if aday_stop >= entry_trigger:
+            continue                       # girişin üstünde olamaz
+        if (entry_trigger - aday_stop) < atr * MIN_STOP_ATR_DISTANCE:
+            continue                       # çok yakın, gürültüye takılır
+        stop = aday_stop
+        break
+
+    if stop is None:
+        stop = atr_stop
     if stop >= entry_trigger:
         stop = entry_trigger - ATR_STOP_MULTIPLIER * atr
 
@@ -1185,7 +1234,8 @@ def calc_levels(df, pullback, resistances):
     # Artık bir direnç, alınan riske göre anlamlı bir kazanç sunmuyorsa
     # (MIN_TARGET_RR_RATIO'dan az) Hedef 1 olarak kullanılmaz; bir sonraki
     # dirence ya da hesaplanmış hedefe geçilir.
-    nearest_res, second_res = resistances
+    # Geriye dönük uyumluluk: eski (nearest, second) tuple'ı da kabul et
+    direncler = sorted(v for v in (resistances or []) if v)
 
     def anlamli_hedef(seviye):
         """Seviye, girişin üzerinde VE riske göre anlamlı kazanç sunuyor mu?"""
@@ -1193,16 +1243,14 @@ def calc_levels(df, pullback, resistances):
             return False
         return (seviye - entry_trigger) >= risk * MIN_TARGET_RR_RATIO
 
-    if anlamli_hedef(nearest_res):
-        target1 = nearest_res
-    elif anlamli_hedef(second_res):
-        # En yakın direnç çok yakın kaldı -> bir sonrakini hedef al
-        target1 = second_res
-        second_res = None  # Hedef 2 için artık kullanılamaz, hesaplanana düşecek
-    else:
-        target1 = entry_trigger + 2 * risk
+    # Dirençleri YAKINDAN UZAĞA tara, ilk anlamlı olanı Hedef 1 yap.
+    # (Eskiden sadece ilk ikisine bakılıyordu -- bkz. find_resistances.)
+    anlamlilar = [d for d in direncler if anlamli_hedef(d)]
+    target1 = anlamlilar[0] if anlamlilar else entry_trigger + 2 * risk
 
-    target2 = second_res if (second_res and second_res > target1) else max(target1 + risk, entry_trigger + 3 * risk)
+    # Hedef 2: Hedef 1'in üzerindeki bir sonraki gerçek direnç; yoksa formül.
+    ustundekiler = [d for d in direncler if d > target1]
+    target2 = ustundekiler[0] if ustundekiler else max(target1 + risk, entry_trigger + 3 * risk)
 
     rr1 = (target1 - entry_trigger) / risk
     rr2 = (target2 - entry_trigger) / risk
@@ -1850,7 +1898,8 @@ def main():
 
             confluence = evaluate_confluence(df, pullback, swing_highs, swing_lows)
             resistances = find_resistances(df, swing_highs, close)
-            levels = calc_levels(df, pullback, resistances)
+            supports = find_supports(df, swing_lows, close)
+            levels = calc_levels(df, pullback, resistances, supports)
             if levels is None:
                 continue
 
