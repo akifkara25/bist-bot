@@ -312,10 +312,17 @@ def clean_df(df):
     try:
         df = df.copy()
         if isinstance(df.columns, pd.MultiIndex):
-            if "Close" in df.columns.get_level_values(0):
-                df.columns = df.columns.get_level_values(0)
-            else:
-                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+            # Alan adları ("Close" vb.) HANGİ katmandaysa o katman alınır.
+            # Eskiden katman 0'da değilse her sütunun ilk parçası (= hisse adı)
+            # alınıyordu; tüm sütunlar "ALBRK.IS" olup veri sessizce boş sayılıyordu.
+            katman = None
+            for i in range(df.columns.nlevels):
+                if "Close" in [str(x).capitalize() for x in df.columns.get_level_values(i)]:
+                    katman = i
+                    break
+            if katman is None:
+                return None
+            df.columns = df.columns.get_level_values(katman)
         df.columns = [str(c).capitalize() for c in df.columns]
         required = ["Open", "High", "Low", "Close", "Volume"]
         if not all(c in df.columns for c in required):
@@ -377,19 +384,6 @@ def veri_tazelik_kontrol(df, market_last_date=None):
     return True, "ok"
 
 
-def data_quality_check(df, market_last_date=None):
-    """
-    Temel + tazelik kontrollerinin birleşimi.
-    NOT: Üretim akışı artık ikisini AYRI çağırıyor (tazelik ancak tüm veri
-    indirildikten sonra hesaplanabildiği için). Bu fonksiyon testler ve
-    dışarıdan tek seferlik kontroller için korunuyor.
-    """
-    ok, sebep = veri_kalitesi_temel(df)
-    if not ok:
-        return ok, sebep
-    return veri_tazelik_kontrol(df, market_last_date)
-
-
 def batch_download(tickers, batch_size=40, retries=3, sleep_between=1.5):
     """
     TEŞHİS EKLENDİ: Eskiden elenen hisseler SESSİZCE atlanıyordu (log.debug
@@ -408,7 +402,13 @@ def batch_download(tickers, batch_size=40, retries=3, sleep_between=1.5):
     def _grubu_isle(batch, data):
         for t in batch:
             try:
-                sub = data[t] if len(batch) > 1 else data
+                # Grup tek hisseden oluşsa bile önce data[t] denenir: yeni yfinance
+                # sürümleri tek hisse için de çok katmanlı (hisse, alan) sütun
+                # döndürebiliyor. Düz tablo dönerse KeyError -> tabloyu kullan.
+                try:
+                    sub = data[t]
+                except Exception:
+                    sub = data
                 cdf = clean_df(sub)
                 if cdf is None:
                     sebepler["bos_veri"] += 1
@@ -602,7 +602,10 @@ def compute_zigzag(df, period=ZIGZAG_PERIOD):
     high, low = df["High"], df["Low"]
     n = len(df)
     if n < period + 5:
-        return pd.Series(dtype=float), pd.Series(dtype=float)
+        # Diğer çıkış yoluyla AYNI tipte boş seri (DatetimeIndex) -- aksi halde
+        # sonraki ".index >= tarih" karşılaştırmaları çöker.
+        bos = lambda: pd.Series(dtype=float, index=pd.DatetimeIndex([]))
+        return bos(), bos()
 
     roll_high = high.rolling(period, min_periods=period).max()
     roll_low = low.rolling(period, min_periods=period).min()
@@ -724,13 +727,6 @@ def calc_rvol(volume, son_mum_tam=True):
         return float(son / avg20) if avg20 > 0 else 1.0
     except Exception:
         return 1.0
-
-
-    high, low, close, volume = df["High"], df["Low"], df["Close"], df["Volume"]
-    mfm = ((close - low) - (high - close)) / (high - low).replace(0, np.nan)
-    mfv = mfm * volume
-    cmf = mfv.rolling(period).sum() / volume.rolling(period).sum()
-    return cmf.fillna(0)
 
 
 def calc_cmf(df, period=20):
@@ -873,7 +869,13 @@ def hh_hl_structure(df, swing_highs, swing_lows, lookback=LOOKBACK_STRUCTURE):
 def trend_filter(df, swing_highs, swing_lows):
     close = df["Close"]
     if len(close) < 210:
-        return {"ok": False, "reason": "yetersiz veri"}
+        # Tüm anahtarlar False olarak döner -- eksik sözlük döndürülürse
+        # compute_score/determine_stage KeyError ile çöker. Şu an main()
+        # içindeki "above200" kontrolü bunu engelliyor, ama güvenliği tek
+        # bir satıra bağlı bırakmamak için sözlük her zaman tam dönüyor.
+        return {"ok": False, "reason": "yetersiz veri", "above20": False, "above50": False,
+                "above200": False, "sma50_rising": False, "golden": False,
+                "hh": False, "hl": False, "weekly_ok": False}
 
     sma20 = close.rolling(20).mean()
     sma50 = close.rolling(50).mean()
@@ -1407,6 +1409,24 @@ STAGE_INFO = {
 }
 
 
+def gosterilen_giris(item):
+    """
+    Mesajda gösterilen giriş fiyatı ile POZİSYON TAKİBİNDE saklanan giriş
+    fiyatının AYNI olmasını garanti eden tek kaynak.
+
+    Eskiden mesaj MAIN_BREAK/EXTENDED'de güncel fiyatı gösteriyor, takip ise
+    entry_trigger'ı (son 3 günün tepesi) saklıyordu -- ölçülen fark %0.6-1.8.
+    Sonuç: "hedefe ulaşıldı" mesajı kullanıcının hiç görmediği bir giriş
+    fiyatı gösteriyor ve kârı olduğundan düşük hesaplıyordu.
+
+    Döner: (giris, not_metni)
+    """
+    l = item["levels"]
+    if item["stage"] in ("MAIN_BREAK", "EXTENDED") and item["close"] > l["stop"]:
+        return item["close"], " _(zaten kırılmış)_"
+    return l["entry_trigger"], ""
+
+
 def build_message(ticker, item):
     stage = item["stage"]
     info = STAGE_INFO[stage]
@@ -1439,12 +1459,7 @@ def build_message(ticker, item):
     # buradan takip edilir), Stop/Hedef/R-R de buna göre TUTARLI şekilde
     # yeniden hesaplanıyor. Sinyal kararı (determine_stage, MIN_RR eşiği)
     # buna dokunmuyor, SADECE mesajdaki gösterim tutarlılığı düzeliyor.
-    if stage in ("MAIN_BREAK", "EXTENDED"):
-        display_entry = item["close"]
-        entry_not = " _(zaten kırılmış)_"
-    else:
-        display_entry = l["entry_trigger"]
-        entry_not = ""
+    display_entry, entry_not = gosterilen_giris(item)
 
     display_risk = display_entry - l["stop"]
     if display_risk > 0:
@@ -1548,6 +1563,9 @@ HISTORY_KEY = "__history__"   # state.json içinde ayrı, ticker olmayan özel b
 PERF_LAST_SENT_KEY = "__perf_last_sent__"  # performans özetinin en son ne zaman gönderildiği
 PERF_SUMMARY_INTERVAL_DAYS = 7  # performans özeti kaç günde bir gönderilsin
 MAX_HISTORY_ENTRIES = 300     # state.json'un sınırsız büyümesini önlemek için
+# Bu kadar gündür güncellenmemiş VE açık pozisyonu olmayan hisse kayıtları silinir.
+# Açık pozisyonlar ve __history__ (performans geçmişi) ASLA silinmez.
+STATE_PRUNE_DAYS = 60
 
 
 def add_to_history(state, ticker, outcome, position, exit_price):
@@ -1757,6 +1775,35 @@ def build_performance_summary(history):
         f"Ortalama getiri: {'+' if avg_pct >= 0 else ''}%{avg_pct:.1f}\n"
         f"_Backtest değildir, botun bugüne kadarki gerçek sinyal geçmişidir._"
     )
+
+
+def prune_state(state, bugun=None):
+    """
+    Uzun süredir güncellenmemiş ve açık pozisyonu olmayan hisse kayıtlarını
+    siler. Aksi halde state.json sınırsız büyür: kriterlere artık uymayan
+    hisselerin kayıtları hiç silinmiyordu (gerçek veride 1 haftada 79 -> 84).
+    Her tarama bu dosyayı GitHub'a commit ettiği için repo geçmişi de şişiyordu.
+
+    ASLA silinmeyenler: açık pozisyonu olan kayıtlar, özel anahtarlar
+    (__history__, __perf_last_sent__), tarihi okunamayan kayıtlar.
+    Döner: silinen kayıt sayısı.
+    """
+    bugun = bugun or datetime.now()
+    silinecek = []
+    for t, v in state.items():
+        if t.startswith("__") or not isinstance(v, dict):
+            continue
+        if v.get("position"):
+            continue
+        try:
+            tarih = datetime.strptime(str(v.get("date", ""))[:10], "%Y-%m-%d")
+        except Exception:
+            continue   # tarihi okunamıyorsa dokunma
+        if (bugun - tarih).days > STATE_PRUNE_DAYS:
+            silinecek.append(t)
+    for t in silinecek:
+        del state[t]
+    return len(silinecek)
 
 
 def maybe_send_performance_summary(state):
@@ -2020,8 +2067,10 @@ def main():
                                  item["confluence"]["rvol"], item["close"])
                 else:
                     l = item["levels"]
+                    # Mesajda gösterilenle BİREBİR aynı giriş (bkz. gosterilen_giris)
+                    takip_giris, _ = gosterilen_giris(item)
                     new_position = {
-                        "entry": l["entry_trigger"], "stop": l["stop"],
+                        "entry": takip_giris, "stop": l["stop"],
                         "target1": l["target1"], "target2": l["target2"],
                         "opened_date": datetime.now().strftime("%Y-%m-%d"),
                     }
@@ -2069,6 +2118,10 @@ def main():
     send_telegram(summary_msg)
 
     maybe_send_performance_summary(state)
+
+    silinen = prune_state(state)
+    if silinen:
+        log.info(f"🧹 {silinen} eski kayıt temizlendi ({STATE_PRUNE_DAYS}+ gün güncellenmemiş, açık pozisyonsuz)")
 
     save_state(state)
 
