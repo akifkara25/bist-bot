@@ -16,11 +16,11 @@
     "position": null
   },
   "SOKM.IS": {
-    "stage": "SETUP",
-    "score": 81.4,
+    "stage": "WATCH",
+    "score": 75.5,
     "rvol": 1.6106003021215778,
-    "close": 58.0,
-    "date": "2026-10-15 19:20:23",
+    "close": 56.75,
+    "date": "2026-10-16 13:11:56",
     "position": null
   },
   "DURDO.IS": {
@@ -175,10 +175,10 @@
   },
   "DOCO.IS": {
     "stage": "WATCH",
-    "score": 65.4,
+    "score": 68.7,
     "rvol": 1.0612578910451251,
-    "close": 10945.0,
-    "date": "2026-10-15 19:20:23",
+    "close": 11127.5,
+    "date": "2026-10-16 13:11:56",
     "position": null
   },
   "GLYHO.IS": {
@@ -204,10 +204,10 @@
   },
   "ALARK.IS": {
     "stage": "WATCH",
-    "score": 72.3,
+    "score": 67.8,
     "rvol": 0.7061073181032931,
-    "close": 109.0999984741211,
-    "date": "2026-10-15 19:20:23",
+    "close": 107.30000305175781,
+    "date": "2026-10-16 13:11:56",
     "position": {
       "entry": 114.01390152740477,
       "stop": 97.66275150299072,
@@ -264,18 +264,18 @@
   },
   "CCOLA.IS": {
     "stage": "WATCH",
-    "score": 51.9,
+    "score": 52.1,
     "rvol": 1.001411163296766,
-    "close": 79.75,
-    "date": "2026-10-15 19:20:23",
+    "close": 78.0999984741211,
+    "date": "2026-10-16 13:11:56",
     "position": null
   },
   "BRSAN.IS": {
     "stage": "WATCH",
-    "score": 74.6,
+    "score": 68.3,
     "rvol": 0.5488119703765798,
-    "close": 660.5,
-    "date": "2026-10-15 19:20:23",
+    "close": 655.0,
+    "date": "2026-10-16 13:11:56",
     "position": null
   },
   "CATES.IS": {
