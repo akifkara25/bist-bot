@@ -1,20 +1,4 @@
 {
-  "KRPLS.IS": {
-    "stage": "WATCH",
-    "score": 65.4,
-    "rvol": 1.9384460087724398,
-    "close": 12.430000305175781,
-    "date": "2026-09-07 15:43:11",
-    "position": null
-  },
-  "TURGG.IS": {
-    "stage": "WATCH",
-    "score": 70.2,
-    "rvol": 0.008871153047806819,
-    "close": 31.219999313354492,
-    "date": "2026-09-08 07:12:28",
-    "position": null
-  },
   "SOKM.IS": {
     "stage": "WATCH",
     "score": 69.3,
@@ -25,18 +9,18 @@
   },
   "ALBRK.IS": {
     "stage": "WATCH",
-    "score": 66.6,
-    "rvol": 1.1902976785579202,
-    "close": 8.529999732971191,
-    "date": "2026-11-05 21:32:07",
+    "score": 69.0,
+    "rvol": 0.9920055367570507,
+    "close": 8.680000305175781,
+    "date": "2026-11-09 18:42:05",
     "position": null
   },
   "AHGAZ.IS": {
-    "stage": "SETUP",
-    "score": 81.9,
-    "rvol": 0.545492883556202,
-    "close": 46.81999969482422,
-    "date": "2026-11-06 21:00:36",
+    "stage": "WATCH",
+    "score": 73.4,
+    "rvol": 0.5684275275538707,
+    "close": 47.0,
+    "date": "2026-11-09 18:42:05",
     "position": null
   },
   "AVPGY.IS": {
@@ -47,14 +31,6 @@
     "date": "2026-09-22 08:21:10",
     "position": null
   },
-  "RUBNS.IS": {
-    "stage": "WATCH",
-    "score": 58.6,
-    "rvol": 0.14132896794485622,
-    "close": 31.100000381469727,
-    "date": "2026-09-07 10:17:31",
-    "position": null
-  },
   "HUNER.IS": {
     "stage": "WATCH",
     "score": 62.4,
@@ -63,28 +39,12 @@
     "date": "2026-09-25 15:41:59",
     "position": null
   },
-  "BORSK.IS": {
-    "stage": "WATCH",
-    "score": 72.2,
-    "rvol": 2.029799765452915,
-    "close": 6.800000190734863,
-    "date": "2026-09-07 15:43:10",
-    "position": null
-  },
   "DOHOL.IS": {
     "stage": "WATCH",
     "score": 66.1,
     "rvol": 0.8811352049049124,
     "close": 21.34000015258789,
     "date": "2026-09-15 15:43:36",
-    "position": null
-  },
-  "BOBET.IS": {
-    "stage": "WATCH",
-    "score": 79.6,
-    "rvol": 1.1866886719002203,
-    "close": 23.799999237060547,
-    "date": "2026-09-07 15:43:10",
     "position": null
   },
   "VAKBN.IS": {
@@ -101,14 +61,6 @@
     "rvol": 0.5013144759057192,
     "close": 22.1200008392334,
     "date": "2026-09-11 15:43:18",
-    "position": null
-  },
-  "AKCNS.IS": {
-    "stage": "SETUP",
-    "score": 65.9,
-    "rvol": 0.8678791034388332,
-    "close": 249.5,
-    "date": "2026-09-09 21:23:58",
     "position": null
   },
   "ARDYZ.IS": {
@@ -145,10 +97,10 @@
   },
   "DOCO.IS": {
     "stage": "WATCH",
-    "score": 67.2,
-    "rvol": 2.2731694428765294,
-    "close": 12200.0,
-    "date": "2026-11-05 21:32:07",
+    "score": 69.5,
+    "rvol": 1.2201664634469596,
+    "close": 12777.5,
+    "date": "2026-11-09 18:42:05",
     "position": null
   },
   "GLYHO.IS": {
@@ -177,18 +129,10 @@
   },
   "KCHOL.IS": {
     "stage": "WATCH",
-    "score": 72.2,
-    "rvol": 1.1077820435013386,
-    "close": 202.3000030517578,
-    "date": "2026-11-06 21:00:36",
-    "position": null
-  },
-  "NETAS.IS": {
-    "stage": "WATCH",
-    "score": 72.6,
-    "rvol": 0.7582347770858261,
-    "close": 99.69999694824219,
-    "date": "2026-09-07 15:43:10",
+    "score": 83.3,
+    "rvol": 1.5229967205497634,
+    "close": 212.39999389648438,
+    "date": "2026-11-09 18:41:58",
     "position": null
   },
   "PCILT.IS": {
@@ -239,44 +183,20 @@
     "date": "2026-09-17 15:42:12",
     "position": null
   },
-  "ALTNY.IS": {
-    "stage": "SETUP",
-    "score": 73.8,
-    "rvol": 1.3358409028726457,
-    "close": 18.18000030517578,
-    "date": "2026-09-09 21:23:51",
-    "position": null
-  },
   "BIMAS.IS": {
     "stage": "WATCH",
-    "score": 40.5,
-    "rvol": 1.75404188638912,
-    "close": 372.5,
-    "date": "2026-11-05 21:32:07",
-    "position": null
-  },
-  "GENIL.IS": {
-    "stage": "WATCH",
-    "score": 68.5,
-    "rvol": 0.6709703143489748,
-    "close": 11.359999656677246,
-    "date": "2026-09-07 15:43:11",
+    "score": 50.0,
+    "rvol": 1.1342173294686244,
+    "close": 381.5,
+    "date": "2026-11-09 18:42:05",
     "position": null
   },
   "MPARK.IS": {
     "stage": "WATCH",
-    "score": 73.2,
-    "rvol": 0.7944664857090542,
-    "close": 437.25,
-    "date": "2026-10-12 22:34:26",
-    "position": null
-  },
-  "DEVA.IS": {
-    "stage": "WATCH",
-    "score": 76.3,
-    "rvol": 0.6021696279379603,
-    "close": 94.30000305175781,
-    "date": "2026-09-07 15:43:10",
+    "score": 67.1,
+    "rvol": 1.130705179470292,
+    "close": 442.0,
+    "date": "2026-11-09 18:42:05",
     "position": null
   },
   "RYGYO.IS": {
@@ -287,20 +207,12 @@
     "date": "2026-11-06 21:00:36",
     "position": null
   },
-  "CRFSA.IS": {
-    "stage": "WATCH",
-    "score": 73.8,
-    "rvol": 0.5758379677057578,
-    "close": 292.75,
-    "date": "2026-09-07 15:43:10",
-    "position": null
-  },
   "INDES.IS": {
     "stage": "WATCH",
-    "score": 65.7,
-    "rvol": 0.860365346287804,
-    "close": 11.0,
-    "date": "2026-11-06 21:00:36",
+    "score": 71.9,
+    "rvol": 1.734928852778507,
+    "close": 11.890000343322754,
+    "date": "2026-11-09 18:42:05",
     "position": null
   },
   "KRDMD.IS": {
@@ -325,14 +237,6 @@
     "rvol": 0.8223745234710587,
     "close": 7.980000019073486,
     "date": "2026-09-10 15:43:46",
-    "position": null
-  },
-  "VANGD.IS": {
-    "stage": "WATCH",
-    "score": 54.6,
-    "rvol": 0.39990776442405446,
-    "close": 91.0,
-    "date": "2026-09-09 21:24:09",
     "position": null
   },
   "ESCAR.IS": {
@@ -367,20 +271,12 @@
     "date": "2026-09-11 13:53:59",
     "position": null
   },
-  "PNSUT.IS": {
-    "stage": "WATCH",
-    "score": 65.1,
-    "rvol": 2.3316701631685923,
-    "close": 12.289999961853027,
-    "date": "2026-09-07 15:43:11",
-    "position": null
-  },
   "EBEBK.IS": {
     "stage": "WATCH",
-    "score": 60.7,
-    "rvol": 0.5261998634391313,
-    "close": 77.75,
-    "date": "2026-11-06 21:00:36",
+    "score": 73.8,
+    "rvol": 0.7674639619450183,
+    "close": 79.6500015258789,
+    "date": "2026-11-09 18:42:01",
     "position": null
   },
   "CELHA.IS": {
@@ -407,29 +303,13 @@
     "date": "2026-09-11 15:43:18",
     "position": null
   },
-  "__perf_last_sent__": "2026-11-02",
+  "__perf_last_sent__": "2026-11-09",
   "INVES.IS": {
     "stage": "WATCH",
     "score": 58.0,
     "rvol": 0.5344326629954284,
     "close": 752.0,
     "date": "2026-09-23 21:39:47",
-    "position": null
-  },
-  "PETKM.IS": {
-    "stage": "WATCH",
-    "score": 59.7,
-    "rvol": 1.295024191813218,
-    "close": 22.059999465942383,
-    "date": "2026-09-07 15:43:11",
-    "position": null
-  },
-  "ADGYO.IS": {
-    "stage": "WATCH",
-    "score": 57.5,
-    "rvol": 1.2387519412323567,
-    "close": 59.650001525878906,
-    "date": "2026-09-07 15:43:11",
     "position": null
   },
   "AEFES.IS": {
@@ -446,22 +326,6 @@
     "rvol": 1.2359883133102127,
     "close": 1.0399999618530273,
     "date": "2026-09-11 15:43:18",
-    "position": null
-  },
-  "ARASE.IS": {
-    "stage": "WATCH",
-    "score": 59.6,
-    "rvol": 0.7924573867839609,
-    "close": 126.5,
-    "date": "2026-09-09 14:21:40",
-    "position": null
-  },
-  "SASA.IS": {
-    "stage": "WATCH",
-    "score": 87.2,
-    "rvol": 4.579412545398669,
-    "close": 2.6700000762939453,
-    "date": "2026-09-08 14:24:36",
     "position": null
   },
   "ANHYT.IS": {
@@ -488,14 +352,6 @@
     "date": "2026-11-06 21:00:36",
     "position": null
   },
-  "ISFIN.IS": {
-    "stage": "WATCH",
-    "score": 51.3,
-    "rvol": 1.0854907102890738,
-    "close": 19.770000457763672,
-    "date": "2026-09-09 21:24:09",
-    "position": null
-  },
   "ASELS.IS": {
     "stage": "WATCH",
     "score": 62.9,
@@ -512,14 +368,6 @@
     "date": "2026-09-14 15:45:20",
     "position": null
   },
-  "THYAO.IS": {
-    "stage": "WATCH",
-    "score": 60.5,
-    "rvol": 1.0586201300469082,
-    "close": 303.75,
-    "date": "2026-09-09 14:21:36",
-    "position": null
-  },
   "TATGD.IS": {
     "stage": "WATCH",
     "score": 56.7,
@@ -530,10 +378,10 @@
   },
   "TRGYO.IS": {
     "stage": "WATCH",
-    "score": 74.5,
-    "rvol": 1.208598337059976,
-    "close": 90.4000015258789,
-    "date": "2026-11-06 20:24:28",
+    "score": 74.4,
+    "rvol": 0.8404077160937939,
+    "close": 92.0999984741211,
+    "date": "2026-11-09 18:41:58",
     "position": null
   },
   "ASTOR.IS": {
@@ -546,10 +394,10 @@
   },
   "AKSGY.IS": {
     "stage": "WATCH",
-    "score": 56.5,
-    "rvol": 4.780312120318166,
-    "close": 9.109999656677246,
-    "date": "2026-10-27 20:12:27",
+    "score": 59.6,
+    "rvol": 1.148970549526238,
+    "close": 9.119999885559082,
+    "date": "2026-11-09 18:42:05",
     "position": null
   },
   "KCAER.IS": {
@@ -813,18 +661,18 @@
   },
   "ENERY.IS": {
     "stage": "WATCH",
-    "score": 61.0,
-    "rvol": 0.7468213989107031,
-    "close": 14.050000190734863,
-    "date": "2026-11-06 21:00:36",
+    "score": 58.4,
+    "rvol": 0.5555596187371518,
+    "close": 14.25,
+    "date": "2026-11-09 18:42:05",
     "position": null
   },
   "TAVHL.IS": {
     "stage": "WATCH",
-    "score": 82.6,
-    "rvol": 2.2495024550393676,
-    "close": 291.0,
-    "date": "2026-11-06 21:00:36",
+    "score": 75.4,
+    "rvol": 0.821866232901312,
+    "close": 303.75,
+    "date": "2026-11-09 18:41:58",
     "position": null
   }
 }
