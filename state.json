@@ -23,14 +23,6 @@
     "date": "2026-11-24 02:30:22",
     "position": null
   },
-  "HUNER.IS": {
-    "stage": "WATCH",
-    "score": 62.4,
-    "rvol": 1.0584590909408749,
-    "close": 4.360000133514404,
-    "date": "2026-09-25 15:41:59",
-    "position": null
-  },
   "VAKBN.IS": {
     "stage": "WATCH",
     "score": 80.4,
@@ -151,14 +143,6 @@
     "date": "2026-10-20 19:31:10",
     "position": null
   },
-  "ISDMR.IS": {
-    "stage": "WATCH",
-    "score": 67.9,
-    "rvol": 0.673877714221917,
-    "close": 63.599998474121094,
-    "date": "2026-09-25 08:21:16",
-    "position": null
-  },
   "EBEBK.IS": {
     "stage": "WATCH",
     "score": 57.1,
@@ -181,7 +165,7 @@
     "score": 75.4,
     "rvol": 1.0176629839476767,
     "close": 145.6999969482422,
-    "date": "2026-11-24 23:27:42",
+    "date": "2026-11-25 00:02:22",
     "position": null
   },
   "ASELS.IS": {
@@ -315,14 +299,6 @@
     "date": "2026-10-15 13:20:33",
     "position": null
   },
-  "TOASO.IS": {
-    "stage": "WATCH",
-    "score": 62.8,
-    "rvol": 1.0069031231774486,
-    "close": 290.0,
-    "date": "2026-09-25 15:41:59",
-    "position": null
-  },
   "YKBNK.IS": {
     "stage": "WATCH",
     "score": 72.0,
@@ -376,7 +352,7 @@
     "score": 71.9,
     "rvol": 1.0787436951786828,
     "close": 288.0,
-    "date": "2026-11-24 23:27:42",
+    "date": "2026-11-25 00:02:22",
     "position": null
   },
   "AKSA.IS": {
@@ -392,7 +368,7 @@
     "score": 50.7,
     "rvol": 0.5662683261129313,
     "close": 3.240000009536743,
-    "date": "2026-11-24 23:27:42",
+    "date": "2026-11-25 00:02:22",
     "position": null
   }
 }
